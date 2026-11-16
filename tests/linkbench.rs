@@ -162,3 +162,34 @@ fn link_benchmark_without_a_card() {
         assert!(result(&text, name).contains("NOT RUN"), "{}", text);
     }
 }
+
+/// The card the RP2040 bridge makes up (sdbridge/src/volume.c: a
+/// partition table, FAT16, LINKTEST.BIN), written to an image by the
+/// bridge's host test program, read by the benchmark: the FAT code and
+/// the file's words as the unit will meet them.  Needs a host C
+/// compiler as well.
+#[test]
+fn link_benchmark_reads_the_bridge_s_volume() {
+    let Some(program) = build() else { return };
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let dir = std::env::temp_dir().join(format!("rnse-sdbridge-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let tool = dir.join("host");
+    let src = root.join("sdbridge/src");
+    let Ok(cc) = std::process::Command::new("cc").args(["-O2", "-o"]).arg(&tool).arg(root.join("sdbridge/tests/host.c"))
+        .arg(src.join("card.c")).arg(src.join("volume.c")).arg(src.join("crc.c")).output() else { return };
+    assert!(cc.status.success(), "{}", String::from_utf8_lossy(&cc.stderr));
+    let image = dir.join("card.img");
+    assert!(std::process::Command::new(&tool).arg(&image).status().unwrap().success());
+    let card = std::fs::read(&image).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(card.len(), 64 << 20);
+    let mut m = start(&program, Some(card));
+    assert!(until(&mut m, "DONE.", 300), "{}", console(&m));
+    let text = console(&m);
+    assert!(text.contains("CARD STARTED"), "{}", text);
+    assert!(text.contains("LINKTEST.BIN: 4096 SECTORS"), "{}", text);
+    for name in CARD_TESTS.iter().chain(PORT_TESTS.iter()) {
+        clean(result(&text, name));
+    }
+}

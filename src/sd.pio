@@ -1,0 +1,101 @@
+; The SD bus, the card's side, one data line.  The host's clock is an
+; input on CLK_PIN and these wait on its edges.  The host changes CMD
+; after a falling edge and reads CMD and DAT0 at a rising one.  This card
+; reads CMD at a rising edge too, but changes its own outputs just after
+; a rising edge rather than a falling one: the synchronisers and an
+; instruction put that 15 ns after the edge at 200 MHz, more than the 5 ns
+; the host needs a bit held, and the bit then stands through the next
+; falling edge and up to the next rising one, whichever the host reads
+; at.  (Changed after a falling edge, a bit came 25 ns late, too late for
+; a rising edge 30 ns on at 16.9 MHz.)  Absolute pin numbers, as `wait
+; gpio` wants them: change CLK_PIN here and in main.c together.
+;
+; sdbridge/tests/piosim.py runs both against a host's waveforms.
+
+.define PUBLIC CLK_PIN 2
+
+; The command line: in_base, out_base, set_base and the jump pin all CMD;
+; shifts to the left, autopush and autopull at 32.  A command is pushed
+; as two words (its bits 46-15, then 14-0 at the top of the second; bit
+; 47, the start bit, is 0), and the state machine waits for the CPU's
+; answer: the response's length in bits less one and its bits, or 0 for
+; none.  Whenever the answer comes, the line is driven high from the
+; first rising edge after it and the response begins after the next: two
+; clocks after the command's end bit at the least (Ncr).  The line is let
+; go once the host has read the end bit.
+.program sd_cmd
+public start:
+    wait 0 gpio CLK_PIN
+    wait 1 gpio CLK_PIN
+    jmp pin start           ; high: no start bit
+    set x, 31
+first:
+    wait 0 gpio CLK_PIN
+    wait 1 gpio CLK_PIN
+    in pins, 1
+    jmp x-- first
+    set x, 14
+second:
+    wait 0 gpio CLK_PIN
+    wait 1 gpio CLK_PIN
+    in pins, 1
+    jmp x-- second
+    in null, 17
+    pull block
+    out x, 32
+    jmp !x start
+    set pins, 1
+    wait 0 gpio CLK_PIN
+    wait 1 gpio CLK_PIN
+    set pindirs, 1
+send:
+    wait 0 gpio CLK_PIN
+    wait 1 gpio CLK_PIN
+    out pins, 1
+    jmp x-- send
+    wait 0 gpio CLK_PIN
+    wait 1 gpio CLK_PIN
+    set pindirs, 0
+    jmp start
+
+; DAT0: out_base and set_base DAT0; shifts to the left, autopull at 32.
+; A block: the number of its bits less one (data and CRC16), then the
+; bits; the start bit and the end bit are this program's.  Blocks follow
+; each other with two clocks between at least.
+.program sd_dat
+public start:
+    pull block
+    out x, 32
+    set pins, 1
+    wait 0 gpio CLK_PIN
+    wait 1 gpio CLK_PIN
+    set pindirs, 1
+    wait 0 gpio CLK_PIN
+    wait 1 gpio CLK_PIN
+    set pins, 0
+bits:
+    wait 0 gpio CLK_PIN
+    wait 1 gpio CLK_PIN
+    out pins, 1
+    jmp x-- bits
+    wait 0 gpio CLK_PIN
+    wait 1 gpio CLK_PIN
+    set pins, 1
+    wait 0 gpio CLK_PIN
+    wait 1 gpio CLK_PIN
+    set pindirs, 0
+    jmp start
+
+; The board's RGB LED (a WS2812 on GP16 of an RP2040-Zero): 24 bits a
+; colour, green red blue, most significant first, at 800 kHz with the
+; state machine at 8 MHz (10 cycles a bit).
+.program ws2812
+.side_set 1
+.wrap_target
+bitloop:
+    out x, 1        side 0 [2]
+    jmp !x low      side 1 [1]
+    jmp bitloop     side 1 [4]
+low:
+    nop             side 0 [4]
+.wrap
