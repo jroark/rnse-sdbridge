@@ -32,6 +32,75 @@ would sit at the end of an SD extension cable; in a car it would be
 soldered to one slot's contacts on the card board, which leaves the
 other slot free.  None of this is built.
 
+### How fast a slot is: `linkbench`
+
+The stock way into a slot, the installed software's card processor
+program with a message for every sector, gave 297 KB/s on the unit
+(below).  Android Auto's video at the 10 to 15 frames a second the 192
+can decode, and its sound as PCM (1.5 Mbit/s for media), want some 3 to
+4 Mbit/s.  `sdk/examples/linkbench` measures what a slot gives without
+the stock program: it loads a program of its own into the slot's card
+processor (written out by hand in its source, as `examples/report`'s
+is) that runs every card command itself, the card's start included,
+and moves sectors without a message each:
+
+* CMD17, a command a sector, through the processor's buffer transfer
+  unit;
+* CMD18 in runs of 64 sectors, two buffers in turn, with a count of the
+  blocks whose words had begun to arrive before their buffer was ready
+  ("late": the host not keeping up);
+* the host port alone, both ways: a count from the processor, words to
+  it added up;
+* on the main processor's side each word with the "nothing to read" pin
+  looked at first (polled), or a block's first word so and the other 255
+  read without looking (burst);
+* the card interface's clock at the stock setting (the processor's
+  clock / 4: 16.9 MHz at the assumed 67.7 MHz), / 3 (22.6 MHz) and / 2
+  (33.9 MHz, over the 25 MHz of a card's default speed).
+
+The card should have `LINKTEST.BIN` (`tools/linktest.py`, on a freshly
+formatted card so that it lies in one run of clusters): every word of it
+is a function of its place, and every word read is checked against it.
+With the stock program (V222 0371) the program first copies the card
+processor's port pins from it, since what pins 0 and 1 drive is not
+known, and times the stock way over the same sectors.  Results on the
+screen and on CAN 0x7F8 (records 0x5f-0x6a, in the source).  Nothing is
+written to the card.  A burst that goes wrong leaves the processor out
+of step with the host; the program notices, loads its program again,
+starts the card again and goes on with the next test.
+
+`tests/linkbench.rs` runs it in the emulator without firmware (no stock
+program, so no pins and no stock time), every word checked:
+
+| test | KB/s |
+|---|---|
+| host port, from the processor / to it | 12950 / 12050 |
+| CMD17, / 4 | 1742 |
+| CMD18, / 4, / 3, / 2 | 2091, 2786, 4170 |
+| the same, burst | 2094, 2792, 4184 |
+
+These say only that the protocol is no longer what limits: CMD18 runs
+at the card interface's rate as the model has it, one data line (8
+clocks a byte) at the divided clock, which a unit's interface may or may
+not match.  The emulator gives a read of the host port one cycle of the
+CPU (4 ns), so its host port figures mean nothing, and an unpaced burst
+there outruns the card processor (a word each of its cycles, 15 ns):
+the test builds the program with `-DBURST_PACE=8`, some 38 ns a read,
+against the 34 ns of the shortest read the 58.8 MHz bus can make.
+Whether a unit's host keeps up with the processor, or outruns it, in a
+burst, is one of the things the unit has to say.
+
+**On the unit, not yet run.**  `sdk/build.sh 192 linkbench`, the result
+on a card as a `.BIN` for `sdboot`, with `LINKTEST.BIN` beside it.  What
+to look for: CMD18's rate at each clock (the interface's real width and
+clock), whether "late" stays at 0 when polled (whether a host of this
+kind is fast enough for a stream), whether burst is clean, and errors in
+the status column at / 2.  The main processor's DMA controller could
+take the words instead (it does on the stock driver's reads), but the
+request selector's setting for reads (at 0x12d00007 / 0x12d00003) is
+not known: a trace of the stock driver (`--io-log` with a card) would
+give it.
+
 ## Decoding
 
 `sdk/examples/h264bench` decodes streams from an SD card with
@@ -190,5 +259,6 @@ fast path for skipped macroblocks.
 If decoding gets fast enough: sound
 through a card processor (PCM), TLS's cost, the Android Auto protocol
 tried on a Mac against a phone (certificate, cipher, margins, the bit
-rate when frames are acknowledged slowly), the link, and a short trial
-of Linux in the emulator.
+rate when frames are acknowledged slowly), `linkbench` on the unit and
+then the bridge itself (the card side of the link, and writes for the
+way back to the phone), and a short trial of Linux in the emulator.
