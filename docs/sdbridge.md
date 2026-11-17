@@ -269,6 +269,76 @@ RP2040 as USB host, the accessory strings and the framing of the first
 message all hold with a real phone.  What follows the version exchange,
 TLS, is not done yet, and the phone gives up on the session after it.
 
+## The TLS handshake, with a test certificate (planned, not built)
+
+After the version exchange, Android Auto runs a TLS 1.2 handshake inside
+its own messages (message 0x0003 on channel 0), the head unit as the
+client, presenting a certificate of its own.  Then the head unit sends
+"authentication complete" (message 0x0004), and everything after it is
+encrypted.  The next desk test is meant to run that part on the Pico,
+with mbedTLS (which the pico-sdk carries), as a third firmware,
+`SDHANDSHAKE.UF2`.  It is not written yet; this is how it is meant to be
+built and what it can show.
+
+**With a test certificate it cannot succeed.**  The phone accepts only a
+head unit certificate issued under Google's Android Auto programme, and
+the repository has none and will not have one.  A self-signed stand-in
+lets everything up to that check run: the handshake's messages in
+Android Auto's frames, mbedTLS on the RP2040 (its memory and how long
+the key operations take on a Cortex-M0+), and the phone's answer.  What
+the phone then sends is a TLS alert, and the session ends there.
+
+### Making the stand-in
+
+Anywhere outside the repository, with OpenSSL (or LibreSSL, as macOS
+has it):
+
+```sh
+mkdir -p ~/rnse-test-cert && cd ~/rnse-test-cert
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+    -subj "/CN=rnse test head unit" \
+    -keyout test-hu.key -out test-hu.crt
+```
+
+That is a 2048-bit RSA key and a certificate signed by itself, both in
+PEM.  `.gitignore` keeps `*.pem`, `*.key`, `*.crt` and `*.der` out of the
+repository all the same; do not put them in it under other names.
+
+### Building with it
+
+The build is meant to take the two files from outside the repository
+and put them into the firmware it makes:
+
+```sh
+AA_CERT=~/rnse-test-cert/test-hu.crt AA_KEY=~/rnse-test-cert/test-hu.key sdbridge/build.sh
+```
+
+`build.sh` would turn them into a header under `sdbridge/work/`
+(ignored) and build `out/SDHANDSHAKE.UF2` and `out/pico/SDHANDSHAKE.UF2`;
+without `AA_CERT` and `AA_KEY` it would leave that firmware out.  The
+UF2 then holds the key: treat it like the key file.
+
+### What it would show
+
+Flashed and cabled as for `SDPHONE.UF2`, the log (GP0, 115200 baud) is
+meant to say:
+
+* the version exchange, as before;
+* each handshake flight in and out, with its length, and how long each
+  key operation took on the Pico;
+* the phone's alert: its level and description (with a self-signed
+  certificate, expect a fatal "bad certificate", "unknown CA" or
+  similar, after the phone has seen the Pico's certificate).
+
+The LED ends on FAIL (three short flashes every 2 s): with a test
+certificate, the phone's alert after the Pico's certificate counts as
+the expected result.
+
+### What it would not show
+
+Anything after the handshake: authentication complete, the phone's
+service discovery, video.  Those need a session the phone accepts.
+
 ## Next
 
 Writes (CMD24 and CMD25) for the way back to the phone, and a mailbox
