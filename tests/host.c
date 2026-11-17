@@ -337,8 +337,8 @@ static void test_aap(void)
     memset(stream, 0, sizeof stream);
     stream[2] = 0xff;
     stream[3] = 0xff;
-    for (i = 0; i < 2048 / 64; i++)
-        CHECK(aap_feed(&r, stream, 64) == 0);
+    for (i = 0; i < (int)sizeof r.buf; i++)
+        CHECK(aap_feed(&r, stream + (i < 4 ? i : 4), 1) == 0);
     CHECK(aap_next(&r, &f) == 0);
     CHECK(aap_feed(&r, stream, 1) == -1);
 }

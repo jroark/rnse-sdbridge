@@ -18,6 +18,13 @@
 #define AAP_VERSION_REQUEST 0x0001
 #define AAP_VERSION_RESPONSE 0x0002
 #define AAP_SSL_HANDSHAKE 0x0003
+#define AAP_AUTH_COMPLETE 0x0004
+#define AAP_SERVICE_DISCOVERY_REQUEST 0x0005
+#define AAP_SERVICE_DISCOVERY_RESPONSE 0x0006
+
+/* The largest frame payload (and so, encrypted, the largest frame's
+ * worth of records). */
+#define AAP_FRAME_MAX 16384
 
 #define AAP_FIRST 1
 #define AAP_LAST 2
@@ -30,7 +37,7 @@ int aap_version_request(uint8_t *out);
 
 /* Frames out of a stream of bytes, which USB may cut anywhere. */
 struct aap_reader {
-    uint8_t buf[2048];
+    uint8_t buf[AAP_FRAME_MAX + 8];
     uint32_t have;
     uint32_t consumed; /* the frame handed out last, still at the front */
 };
@@ -46,6 +53,38 @@ int aap_feed(struct aap_reader *r, const uint8_t *p, uint32_t n);
 /* The next whole frame, 1; 0 when there is none yet.  The frame's
  * payload stays good until the next aap_feed or aap_next. */
 int aap_next(struct aap_reader *r, struct aap_frame *f);
+
+/* One frame holding a whole message (first and last): its bytes into
+ * out (n + 4 of them), their number returned. */
+int aap_frame(uint8_t *out, uint8_t channel, uint8_t flags, const uint8_t *payload, uint16_t n);
+
+/* A message out of its frames' payloads (decrypted first when they are
+ * encrypted).  1 when a frame completes it (then buf and len hold it),
+ * 0 when more is to come, -1 when frames come out of order or it is too
+ * long. */
+#define AAP_MESSAGE_MAX 32768
+struct aap_assembler {
+    uint8_t buf[AAP_MESSAGE_MAX];
+    uint32_t len;
+    int open;
+};
+void aap_assembler_init(struct aap_assembler *a);
+int aap_assemble(struct aap_assembler *a, uint8_t flags, const uint8_t *p, uint32_t n);
+
+/* "Authentication complete", status 0, as its message's payload. */
+int aap_auth_complete(uint8_t *payload);
+
+/* The fields of a protocol buffer, one at a time: from *at (start at
+ * 0), the field's number and wire type, and for a varint its value, for
+ * a length-delimited field its bytes.  1 a field, 0 the end, -1 not a
+ * protocol buffer. */
+struct aap_pb_field {
+    uint32_t number, type;
+    uint64_t value;
+    const uint8_t *bytes;
+    uint32_t len;
+};
+int aap_pb_next(const uint8_t *p, uint32_t n, uint32_t *at, struct aap_pb_field *f);
 
 /* A version response's major and minor version and its status (0 the
  * versions match); 0, or -1 when f is not one. */

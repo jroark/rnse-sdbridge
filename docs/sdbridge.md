@@ -269,24 +269,23 @@ RP2040 as USB host, the accessory strings and the framing of the first
 message all hold with a real phone.  What follows the version exchange,
 TLS, is not done yet, and the phone gives up on the session after it.
 
-## The TLS handshake, with a test certificate (planned, not built)
+## The TLS handshake, with a test certificate: `SDHANDSHAKE.UF2`
 
 After the version exchange, Android Auto runs a TLS 1.2 handshake inside
 its own messages (message 0x0003 on channel 0), the head unit as the
 client, presenting a certificate of its own.  Then the head unit sends
 "authentication complete" (message 0x0004), and everything after it is
-encrypted.  The next desk test is meant to run that part on the Pico,
-with mbedTLS (which the pico-sdk carries), as a third firmware,
-`SDHANDSHAKE.UF2`.  It is not written yet; this is how it is meant to be
-built and what it can show.
+encrypted.  The third desk test runs that part on the Pico, with the
+pico-sdk's mbedTLS (2.28): `src/aa_tls.c` moves mbedTLS's bytes in and
+out of Android Auto's frames, `src/sdhandshake.c` is the firmware.
 
 **With a test certificate it cannot succeed.**  The phone accepts only a
 head unit certificate issued under Google's Android Auto programme, and
 the repository has none and will not have one.  A self-signed stand-in
 lets everything up to that check run: the handshake's messages in
-Android Auto's frames, mbedTLS on the RP2040 (its memory and how long
-the key operations take on a Cortex-M0+), and the phone's answer.  What
-the phone then sends is a TLS alert, and the session ends there.
+Android Auto's frames, mbedTLS on the RP2040 (its memory, and how long
+each step takes on a Cortex-M0+), and the phone's answer, which is a TLS
+alert; the session ends there.
 
 ### Making the stand-in
 
@@ -300,44 +299,73 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
     -keyout test-hu.key -out test-hu.crt
 ```
 
-That is a 2048-bit RSA key and a certificate signed by itself, both in
-PEM.  `.gitignore` keeps `*.pem`, `*.key`, `*.crt` and `*.der` out of the
+A 2048-bit RSA key and a certificate signed by itself, both in PEM.
+`.gitignore` keeps `*.pem`, `*.key`, `*.crt` and `*.der` out of the
 repository all the same; do not put them in it under other names.
 
 ### Building with it
-
-The build is meant to take the two files from outside the repository
-and put them into the firmware it makes:
 
 ```sh
 AA_CERT=~/rnse-test-cert/test-hu.crt AA_KEY=~/rnse-test-cert/test-hu.key sdbridge/build.sh
 ```
 
-`build.sh` would turn them into a header under `sdbridge/work/`
-(ignored) and build `out/SDHANDSHAKE.UF2` and `out/pico/SDHANDSHAKE.UF2`;
-without `AA_CERT` and `AA_KEY` it would leave that firmware out.  The
-UF2 then holds the key: treat it like the key file.
+`sdbridge/pem2c.py` turns the two files into `sdbridge/work/hu_cert.h`
+(ignored by git) and the build adds `out/SDHANDSHAKE.UF2` and
+`out/pico/SDHANDSHAKE.UF2`.  Without `AA_CERT` and `AA_KEY` it leaves
+that firmware out (and removes an old header and UF2).  The header and
+the UF2s hold the key: treat them like the key file.
 
-### What it would show
+Flash and cable as for `SDPHONE.UF2` (5 V on VBUS, the OTG adapter).
+TinyUSB and TLS run on core 1 with a 16 KiB stack; the static buffers
+leave mbedTLS some 95 KiB of heap.
 
-Flashed and cabled as for `SDPHONE.UF2`, the log (GP0, 115200 baud) is
-meant to say:
+### What it shows
 
-* the version exchange, as before;
-* each handshake flight in and out, with its length, and how long each
-  key operation took on the Pico;
-* the phone's alert: its level and description (with a self-signed
-  certificate, expect a fatal "bad certificate", "unknown CA" or
-  similar, after the phone has seen the Pico's certificate).
+The log (GP0, 115200 baud):
 
-The LED ends on FAIL (three short flashes every 2 s): with a test
-certificate, the phone's alert after the Pico's certificate counts as
-the expected result.
+```
+version request sent
+Android Auto answered: version 1.x, they match
+handshake: 0 bytes from the phone, ... ms on the Pico
+handshake: ... bytes to the phone            (ClientHello)
+handshake: ... bytes from the phone, ... ms on the Pico
+handshake: ... bytes to the phone            (the certificate, the key exchange, ...)
+the phone ended the handshake with alert 42 (bad certificate)
+with a test certificate, that is the expected end of this test
+```
 
-### What it would not show
+The milliseconds are the RP2040's time for each step: the key exchange
+and the signature with the head unit's key are the slow ones on a
+Cortex-M0+, and whether the phone waits for them is one of the things
+this shows.  The alert number depends on the phone (42 bad certificate,
+48 unknown CA, 46 certificate unknown are the likely ones).
 
-Anything after the handshake: authentication complete, the phone's
-service discovery, video.  Those need a session the phone accepts.
+The LED: WAIT, then BUSY through the switch and the handshake, and FAIL
+(three short flashes every 2 s) after the alert, which with a test
+certificate is the expected end.  With a certificate the phone accepts,
+it would go on: WORKING once the handshake is done and authentication
+complete sent, OK when the phone's service discovery request has been
+decrypted, its text fields (the phone's name among them) in the log.
+
+### Tested here
+
+`sh sdbridge/tests/run.sh` builds `tests/tls_host.c` on the host with
+the same mbedTLS and runs `aa_tls.c` as the head unit against an
+mbedTLS server standing in for the phone, every byte through Android
+Auto's frames, cut into 64-byte pieces as USB delivers them.  Its
+certificates are made by OpenSSL for the test only, in
+`sdbridge/work/tls-test/`:
+
+* a phone that trusts the head unit's certificate: the handshake
+  completes (ECDHE-RSA with AES-256-GCM), authentication complete goes
+  across, an encrypted service discovery request comes out of the
+  frames and is read, and an encrypted answer goes back;
+* a phone that trusts only another authority, as a real phone trusts
+  only Google's: it ends the handshake with alert 48 (unknown CA), and
+  the head unit reports it.
+
+Not tested: the firmware on a board, how long the steps take there, and
+a real phone's answer.
 
 ## Next
 

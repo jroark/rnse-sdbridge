@@ -70,3 +70,103 @@ int aap_version_response(const struct aap_frame *f, uint16_t *major, uint16_t *m
     *status = (uint16_t)(p[6] << 8 | p[7]);
     return 0;
 }
+
+int aap_frame(uint8_t *out, uint8_t channel, uint8_t flags, const uint8_t *payload, uint16_t n)
+{
+    uint16_t i;
+    out[0] = channel;
+    out[1] = (uint8_t)(flags | AAP_FIRST | AAP_LAST);
+    out[2] = (uint8_t)(n >> 8);
+    out[3] = (uint8_t)n;
+    for (i = 0; i < n; i++)
+        out[4 + i] = payload[i];
+    return n + 4;
+}
+
+void aap_assembler_init(struct aap_assembler *a)
+{
+    a->len = 0;
+    a->open = 0;
+}
+
+int aap_assemble(struct aap_assembler *a, uint8_t flags, const uint8_t *p, uint32_t n)
+{
+    uint32_t i;
+    if (flags & AAP_FIRST) {
+        a->len = 0;
+        a->open = 1;
+    } else if (!a->open) {
+        return -1;
+    }
+    if (n > sizeof a->buf - a->len) {
+        a->open = 0;
+        return -1;
+    }
+    for (i = 0; i < n; i++)
+        a->buf[a->len++] = p[i];
+    if (flags & AAP_LAST) {
+        a->open = 0;
+        return 1;
+    }
+    return 0;
+}
+
+int aap_auth_complete(uint8_t *payload)
+{
+    /* The id, then the protocol buffer's field 1 (status) = 0. */
+    payload[0] = 0x00;
+    payload[1] = AAP_AUTH_COMPLETE;
+    payload[2] = 0x08;
+    payload[3] = 0x00;
+    return 4;
+}
+
+static int varint(const uint8_t *p, uint32_t n, uint32_t *at, uint64_t *v)
+{
+    int shift = 0;
+    *v = 0;
+    while (*at < n && shift < 64) {
+        uint8_t b = p[(*at)++];
+        *v |= (uint64_t)(b & 0x7f) << shift;
+        if (!(b & 0x80))
+            return 0;
+        shift += 7;
+    }
+    return -1;
+}
+
+int aap_pb_next(const uint8_t *p, uint32_t n, uint32_t *at, struct aap_pb_field *f)
+{
+    uint64_t key, len;
+    if (*at >= n)
+        return 0;
+    if (varint(p, n, at, &key))
+        return -1;
+    f->number = (uint32_t)(key >> 3);
+    f->type = (uint32_t)(key & 7);
+    f->bytes = 0;
+    f->len = 0;
+    f->value = 0;
+    switch (f->type) {
+    case 0:
+        return varint(p, n, at, &f->value) ? -1 : 1;
+    case 1:
+        if (n - *at < 8)
+            return -1;
+        *at += 8;
+        return 1;
+    case 5:
+        if (n - *at < 4)
+            return -1;
+        *at += 4;
+        return 1;
+    case 2:
+        if (varint(p, n, at, &len) || len > n - *at)
+            return -1;
+        f->bytes = p + *at;
+        f->len = (uint32_t)len;
+        *at += (uint32_t)len;
+        return 1;
+    }
+    return -1;
+}
