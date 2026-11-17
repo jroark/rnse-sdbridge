@@ -259,7 +259,15 @@ The framing (`src/aap.c`) follows aasdk, the open-source head unit
 library: Google does not publish the protocol.  It is tested on the host
 (`tests/host.c`): the request's bytes, a response cut anywhere, two
 frames in one transfer, the longer header of a first frame of several.
-The firmware itself has not run on a board.
+
+**Seen on hardware, 2026-11-17:** on a Raspberry Pi Pico (`out/pico/`),
+powered through VBUS (pin 40) and cabled through a micro-USB OTG
+adapter, the user's phone switched to accessory mode, said "Android Auto
+connected to your vehicle", and answered the version request with
+matching versions (the LED steady on).  So the cabling, the power, the
+RP2040 as USB host, the accessory strings and the framing of the first
+message all hold with a real phone.  What follows the version exchange,
+TLS, is not done yet, and the phone gives up on the session after it.
 
 ## Next
 
