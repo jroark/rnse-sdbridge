@@ -19,3 +19,15 @@ pico_enable_stdio_uart(sdbridge 0)
 # SDK would want picotool for that).
 add_custom_command(TARGET sdbridge POST_BUILD
     COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:sdbridge> sdbridge.bin)
+
+# The phone on the desk (src/sdphone.c): the USB port as a host, the log
+# on UART0 (GP0, 115200 baud).
+add_executable(sdphone src/sdphone.c src/aap.c)
+pico_generate_pio_header(sdphone ${CMAKE_CURRENT_LIST_DIR}/src/sd.pio OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/phone)
+target_include_directories(sdphone PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src)
+target_compile_options(sdphone PRIVATE -Wall -Wextra -O2)
+target_link_libraries(sdphone pico_stdlib hardware_pio tinyusb_host)
+pico_enable_stdio_usb(sdphone 0)
+pico_enable_stdio_uart(sdphone 1)
+add_custom_command(TARGET sdphone POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:sdphone> sdphone.bin)

@@ -1,9 +1,10 @@
 #!/bin/sh
 # Build the SD bridge for a Waveshare RP2040-Zero:   sdbridge/build.sh
 #
-# The result is sdbridge/out/: SDBRIDGE.UF2 for the board's USB drive
-# (hold BOOT while plugging it in, copy the file onto RPI-RP2) and
-# sdbridge.elf for a debugger.  docs/sdbridge.md says how to wire it.
+# The result is sdbridge/out/: SDBRIDGE.UF2, the card, and SDPHONE.UF2,
+# the phone on the desk, for the board's USB drive (hold BOOT while
+# plugging it in, copy the file onto RPI-RP2), and sdbridge.elf for a
+# debugger.  docs/sdbridge.md says how to wire it.
 #
 # The pico-sdk (BSD-3) and the TinyUSB it uses (MIT) are not kept in
 # the repository: they are cloned, pinned and checked against their
@@ -38,6 +39,7 @@ cmake -S "$here" -B "$work/build" -DPICO_SDK_PATH="$PICO_SDK_PATH" -DPICO_BOARD=
     -DCMAKE_BUILD_TYPE=Release ${SYS_KHZ:+-DCMAKE_C_FLAGS=-DSYS_KHZ=$SYS_KHZ} >/dev/null
 cmake --build "$work/build" -j4
 python3 -I "$here/uf2.py" "$work/build/sdbridge.bin" "$out/SDBRIDGE.UF2"
+python3 -I "$here/uf2.py" "$work/build/sdphone.bin" "$out/SDPHONE.UF2"
 cp "$work/build/sdbridge.elf" "$out/sdbridge.elf"
 cp "$work/build/sd.pio.h" "$out/sd.pio.h"
-ls -l "$out/SDBRIDGE.UF2"
+ls -l "$out/SDBRIDGE.UF2" "$out/SDPHONE.UF2"

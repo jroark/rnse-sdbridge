@@ -10,7 +10,7 @@ set -e
 here=$(cd "$(dirname "$0")" && pwd)
 src=$here/../src
 mkdir -p "$here/../work"
-${CC:-cc} -O2 -Wall -Wextra -o "$here/../work/host" "$here/host.c" "$src/card.c" "$src/volume.c" "$src/crc.c"
+${CC:-cc} -O2 -Wall -Wextra -o "$here/../work/host" "$here/host.c" "$src/card.c" "$src/volume.c" "$src/crc.c" "$src/aap.c"
 "$here/../work/host"
 if [ -f "$here/../out/sd.pio.h" ]; then
     python3 -I "$here/piosim.py" "$here/../out/sd.pio.h"

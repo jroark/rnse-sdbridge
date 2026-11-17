@@ -11,6 +11,7 @@
 #include "../src/card.h"
 #include "../src/crc.h"
 #include "../src/volume.h"
+#include "../src/aap.h"
 
 static int failures;
 #define CHECK(c) do { if (!(c)) { printf("%s:%d: %s\n", __FILE__, __LINE__, #c); failures++; } } while (0)
@@ -295,6 +296,53 @@ static void test_volume(void)
     }
 }
 
+static void test_aap(void)
+{
+    static struct aap_reader r;
+    struct aap_frame f;
+    uint8_t req[16], stream[64];
+    uint16_t major = 0, minor = 0, status = 1;
+    int n, i;
+    static const uint8_t want[] = { 0, 3, 0, 6, 0, 1, 0, 1, 0, 1 };
+    n = aap_version_request(req);
+    CHECK(n == 10 && memcmp(req, want, 10) == 0);
+    /* A version response, then a frame of another channel, fed a byte
+     * at a time as USB might cut them. */
+    static const uint8_t resp[] = { 0, 3, 0, 8, 0, 2, 0, 1, 0, 6, 0, 0,  5, 3, 0, 2, 0xab, 0xcd };
+    aap_reader_init(&r);
+    n = 0;
+    for (i = 0; i < (int)sizeof resp; i++) {
+        CHECK(aap_feed(&r, resp + i, 1) == 0);
+        while (aap_next(&r, &f)) {
+            if (n == 0) {
+                CHECK(i == 11);
+                CHECK(aap_version_response(&f, &major, &minor, &status) == 0);
+                CHECK(major == 1 && minor == 6 && status == 0);
+            } else {
+                CHECK(i == 17 && f.channel == 5 && f.length == 2 && f.payload[0] == 0xab && f.payload[1] == 0xcd);
+                CHECK(aap_version_response(&f, &major, &minor, &status) == -1);
+            }
+            n++;
+        }
+    }
+    CHECK(n == 2);
+    /* A first frame of several has four bytes more of header. */
+    static const uint8_t first[] = { 7, AAP_FIRST, 0, 2, 0, 0, 0x10, 0, 0x11, 0x22 };
+    aap_reader_init(&r);
+    CHECK(aap_feed(&r, first, sizeof first) == 0);
+    CHECK(aap_next(&r, &f) == 1 && f.channel == 7 && f.length == 2 && f.payload[0] == 0x11);
+    CHECK(aap_next(&r, &f) == 0);
+    /* Too much without a frame's end. */
+    aap_reader_init(&r);
+    memset(stream, 0, sizeof stream);
+    stream[2] = 0xff;
+    stream[3] = 0xff;
+    for (i = 0; i < 2048 / 64; i++)
+        CHECK(aap_feed(&r, stream, 64) == 0);
+    CHECK(aap_next(&r, &f) == 0);
+    CHECK(aap_feed(&r, stream, 1) == -1);
+}
+
 int main(int argc, char **argv)
 {
     card_reset(&card);
@@ -321,6 +369,7 @@ int main(int argc, char **argv)
     test_damaged();
     test_block();
     test_volume();
+    test_aap();
     printf(failures ? "sdbridge host tests: %d FAILED\n" : "sdbridge host tests: all passed\n", failures);
     return failures != 0;
 }

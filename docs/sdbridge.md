@@ -159,11 +159,81 @@ electrical.  Only a unit can say:
 * whether the interface's clock really is 16.9 MHz at the stock
   setting.
 
+## The phone on the desk: `SDPHONE.UF2`
+
+The second step needs no unit: the board as the USB host of your phone,
+doing what an Android Auto head unit does first.  It asks the phone to
+switch into accessory mode (Android Open Accessory), and when the phone
+comes back in that mode, sends Android Auto's version request and waits
+for the answer.  That shows the cable, the power, the phone's accessory
+mode and its Android Auto, before anything else depends on them.  No
+certificate and no TLS yet: the version exchange comes before both.
+
+`sdbridge/build.sh` builds it beside the card (`SDPHONE.UF2`); flash it
+the same way.  It is a separate firmware because the board's USB port is
+the host here, so its log moves to a serial line: **GP0** (UART0 TX,
+115200 baud), for a USB serial adapter or a second Pico running
+debugprobe.  The log is optional: the LED says how far it got.
+
+| LED | Meaning |
+|---|---|
+| blue | waiting for a phone |
+| yellow | a phone: asking it to switch to accessory mode |
+| cyan | in accessory mode, the version request sent |
+| **green** | Android Auto answered and the versions match: this step works |
+| magenta | it answered, the versions do not match (the log has them) |
+| red | the device has no accessory mode, or a transfer failed; unplug to retry |
+
+**Cabling.**  The phone must be the USB *device*.  A USB-C to USB-C cable
+lets the phone decide it is the host, and it will.  So use the board's
+USB-C port with a USB-C (male) to USB-A (female) OTG adapter, and the
+phone's ordinary USB-A to USB-C cable into that.  The A-to-C cable's
+pull-up tells the phone that the other end is the host.
+
+**Power.**  The board's own USB port is busy, so power it through its
+**5V** pin, from a supply that can also charge a phone (a phone draws up
+to an amp or more from a host): a USB power bank or a 5 V adapter on a
+breakout.  The phone only offers its USB side when it sees 5 V on the
+cable, so check with a meter, before plugging the phone in, that the
+5 V on the board's 5V pin also reaches VBUS on the adapter's USB-A
+socket.  If the board passes it through a diode that blocks this way,
+feed 5 V to the socket's VBUS directly.  Never connect a second supply
+to the board's USB-C port while the 5V pin is powered.
+
+**On the phone.**  Android Auto installed (it is part of the system on
+recent Android) and, in Android Auto's settings, *Add new cars to
+Android Auto* on: otherwise it ignores a head unit it has not seen.  The
+phone may ask whether to allow the "Android Auto" accessory: allow it.
+
+What the log looks like when it works:
+
+```
+sdphone: waiting for a phone on the USB port
+device 1: 18d1:4ee1
+accessory protocol version 2
+asked to start accessory mode: the phone should come back as 18d1:2d00
+device 1 gone
+device 1: 18d1:2d01
+accessory endpoints: in 81, out 01
+version request sent
+frame: channel 0, flags 03, 8 bytes
+Android Auto answered: version 1.x, they match
+```
+
+(The phone's own ids on the second line, and the version on the last,
+depend on the phone.)
+
+The framing (`src/aap.c`) follows aasdk, the open-source head unit
+library: Google does not publish the protocol.  It is tested on the host
+(`tests/host.c`): the request's bytes, a response cut anywhere, two
+frames in one transfer, the longer header of a first frame of several.
+The firmware itself has not run on a board.
+
 ## Next
 
 Writes (CMD24 and CMD25) for the way back to the phone, and a mailbox
 of our own on top of reads and writes (sector addresses as channels);
-then the USB host for the phone (Android Open Accessory) on the board's
-connector, which the log uses now.  The RP2040's USB is full speed only
+then the two firmwares in one, the phone's bytes carried through the
+slot, and the protocol itself (TLS and the channels) on the 192.  The RP2040's USB is full speed only
 (12 Mbit/s): whether a phone's Android Auto is content with that is the
 question of that step.

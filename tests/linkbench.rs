@@ -177,7 +177,7 @@ fn link_benchmark_reads_the_bridge_s_volume() {
     let tool = dir.join("host");
     let src = root.join("sdbridge/src");
     let Ok(cc) = std::process::Command::new("cc").args(["-O2", "-o"]).arg(&tool).arg(root.join("sdbridge/tests/host.c"))
-        .arg(src.join("card.c")).arg(src.join("volume.c")).arg(src.join("crc.c")).output() else { return };
+        .arg(src.join("card.c")).arg(src.join("volume.c")).arg(src.join("crc.c")).arg(src.join("aap.c")).output() else { return };
     assert!(cc.status.success(), "{}", String::from_utf8_lossy(&cc.stderr));
     let image = dir.join("card.img");
     assert!(std::process::Command::new(&tool).arg(&image).status().unwrap().success());
