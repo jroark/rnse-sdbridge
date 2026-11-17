@@ -8,14 +8,23 @@
  *
  * With a self-signed test certificate the phone ends the handshake with
  * an alert once it has seen the certificate: the log says which, and
- * how long each step took on the Pico.  That is the expected result of
- * this test with a stand-in certificate.
+ * how long each step took on the Pico.  With a certificate the phone
+ * accepts, the handshake completes.
+ *
+ * Built with AA_STREAM=1 it is SDSTREAM.UF2, and goes on from there as
+ * an 800x480 head unit (src/aa_hu.c): it answers the service discovery
+ * request, opens the channels, sets up and focuses the video channel and
+ * acknowledges the phone's H.264 frames and its sound, counting them.
+ * Once a second the log has the video's rate (frames, kilobytes, key
+ * frames), the sound's, the USB's, and the time the Pico spends
+ * decrypting.  Nothing is kept: it
+ * measures what the phone sends over the RP2040's full-speed USB.
  *
  * The LED (src/status.h): WAIT for a phone, BUSY while it switches and
  * the handshake runs, WORKING once the handshake is done, OK when the
- * service discovery request has been read, FAIL for an alert or any
- * other failure (until the phone is unplugged).  The log is on GP0
- * (UART0 TX, 115200 baud).
+ * service discovery request has been read (SDSTREAM: when video frames
+ * arrive), FAIL for an alert or any other failure (until the phone is
+ * unplugged).  The log is on GP0 (UART0 TX, 115200 baud).
  *
  * TinyUSB and TLS run on core 1, which has a stack of 16 KiB here (the
  * key operations want more than core 0's 2 KiB); core 0 keeps the LED.
@@ -27,20 +36,41 @@
 #include "aap.h"
 #include "aoa.h"
 #include "aa_tls.h"
+#include "aa_hu.h"
 #include "status.h"
 #include "mbedtls/error.h"
 #include "hu_cert.h"
 
+#ifndef AA_STREAM
+#define AA_STREAM 0
+#endif
+/* The video frames the phone may send ahead of the acknowledgements. */
+#ifndef AA_MAX_UNACKED
+#define AA_MAX_UNACKED 1
+#endif
+
 static struct aap_reader reader;
 static struct aap_assembler msg;
 static struct aa_tls tls;
+static struct aa_hu hu;
 static uint8_t tls_out[AA_TLS_BUF];
 static uint8_t frame[AA_TLS_BUF + 8];
 static uint8_t plain[AAP_FRAME_MAX];
 
-enum { WAITING, SWITCHING, VERSION, HANDSHAKE, AUTHED, DISCOVERED, FAILED };
+enum { WAITING, SWITCHING, VERSION, HANDSHAKE, AUTHED, DISCOVERED, STREAMING, FAILED };
 static int state = WAITING;
 static uint8_t daddr;
+
+/* What the stream's log counts. */
+static uint64_t usb_bytes;
+static uint64_t decrypt_us;
+static uint32_t frames_in;
+static int authed, sound_seen;
+static uint32_t t_auth, t_video, t_stats;
+static struct {
+    uint64_t usb, video, decrypt, audio;
+    uint32_t messages, idr, frames;
+} last;
 
 static void fail(const char *why, int r)
 {
@@ -78,6 +108,31 @@ static int send_handshake(const uint8_t *p, size_t n)
     return aoa_send(daddr, frame, (uint32_t)(len + 4));
 }
 
+/* A message, encrypted, as one frame. */
+static int send_encrypted(uint8_t channel, uint8_t flags, const uint8_t *p, uint32_t n)
+{
+    size_t rl;
+    int r = aa_tls_encrypt(&tls, p, n, tls_out, sizeof tls_out, &rl);
+    if (r) {
+        fail("encrypting", r);
+        return -1;
+    }
+    if (aoa_send(daddr, frame, (uint32_t)aap_frame(frame, channel, (uint8_t)(flags | AAP_ENCRYPTED), tls_out, (uint16_t)rl))) {
+        fail("sending to the phone failed", 0);
+        return -1;
+    }
+    return 0;
+}
+
+/* The head unit's answers, in order. */
+static void flush(void)
+{
+    unsigned i;
+    for (i = 0; i < hu.nout && state != FAILED; i++)
+        send_encrypted(hu.out[i].channel, hu.out[i].flags, hu.out[i].data, hu.out[i].len);
+    hu.nout = 0;
+}
+
 /* A step of the handshake, with the bytes the phone sent (or none). */
 static void handshake(const uint8_t *in, size_t n)
 {
@@ -94,7 +149,7 @@ static void handshake(const uint8_t *in, size_t n)
         printf("the phone ended the handshake with alert %d%s\n", a,
             a == 42 ? " (bad certificate)" : a == 48 ? " (unknown CA)" : a == 46 ? " (certificate unknown)" :
             a == 40 ? " (handshake failure)" : a == 43 ? " (unsupported certificate)" : "");
-        printf("with a test certificate, that is the expected end of this test\n");
+        printf("with a self-signed test certificate that is the expected end; one the phone accepts goes on\n");
         state = FAILED;
         status_set(ST_FAIL);
         return;
@@ -113,7 +168,17 @@ static void handshake(const uint8_t *in, size_t n)
         }
         printf("authentication complete sent\n");
         state = AUTHED;
+        t_auth = t_stats = ms();
+        authed = 1;
+        /* The seconds' counts from here. */
+        last.usb = usb_bytes;
+        last.decrypt = decrypt_us;
+        last.frames = frames_in;
+        last.video = last.audio = 0;
+        last.messages = last.idr = 0;
         status_set(ST_WORKING);
+        if (AA_STREAM)
+            aa_hu_init(&hu, AA_MAX_UNACKED);
     }
 }
 
@@ -156,11 +221,46 @@ static void message(const uint8_t *m, uint32_t n, int channel)
     }
 }
 
+/* SDSTREAM: a decrypted frame to the head unit. */
+static void session_frame(const struct aap_frame *f, const uint8_t *p, uint32_t n)
+{
+    if (aa_hu_media_channel(f->channel) && !(f->flags & AAP_CONTROL) &&
+        aa_hu_media_frame(&hu, f->channel, f->flags, p, n)) {
+        if (f->channel != AA_CH_VIDEO) {
+            if (!sound_seen) {
+                sound_seen = 1;
+                printf("sound arriving on channel %d\n", f->channel);
+            }
+        } else if (state != STREAMING) {
+            state = STREAMING;
+            t_video = ms();
+            printf("video frames arriving, %lu ms after authentication\n", (unsigned long)(t_video - t_auth));
+            status_set(ST_OK);
+        }
+        if (hu.v.config_new) {
+            uint32_t i;
+            hu.v.config_new = 0;
+            printf("codec configuration (%lu bytes):", (unsigned long)hu.v.config_len);
+            for (i = 0; i < hu.v.config_len; i++)
+                printf(" %02x", hu.v.config[i]);
+            printf("\nH.264 profile %d (%s), constraints %02x, level %d.%d\n", hu.v.profile,
+                hu.v.profile == 66 ? "Baseline" : hu.v.profile == 77 ? "Main" : hu.v.profile == 100 ? "High" : "?",
+                hu.v.constraints & 0xff, hu.v.level / 10, hu.v.level % 10);
+        }
+    } else if (aap_assemble(&msg, f->flags, p, n) == 1) {
+        if (state == AUTHED && f->channel == 0 && msg.len >= 2 && msg.buf[1] == AAP_SERVICE_DISCOVERY_REQUEST)
+            state = DISCOVERED;
+        aa_hu_message(&hu, f->channel, f->flags, msg.buf, msg.len);
+    }
+    flush();
+}
+
 static void frames(void)
 {
     struct aap_frame f;
     uint16_t major, minor, st;
     while (state != FAILED && aap_next(&reader, &f)) {
+        frames_in++;
         if (state == VERSION) {
             if (aap_version_response(&f, &major, &minor, &st) == 0) {
                 printf("Android Auto answered: version %u.%u, %s\n", major, minor, st == 0 ? "they match" : "they do not match");
@@ -170,7 +270,8 @@ static void frames(void)
                 }
                 state = HANDSHAKE;
                 status_set(ST_BUSY);
-                if (aa_tls_init(&tls, 0, hu_cert_pem, sizeof hu_cert_pem, hu_key_pem, sizeof hu_key_pem, NULL, 0)) {
+                if (aa_tls_init(&tls, 0, hu_cert_pem, sizeof hu_cert_pem, HU_CERT_WIRE ? hu_cert_wire : NULL,
+                                HU_CERT_WIRE ? sizeof hu_cert_wire : 0, hu_key_pem, sizeof hu_key_pem, NULL, 0)) {
                     fail("the certificate or key the build was given did not parse", 0);
                     return;
                 }
@@ -180,12 +281,16 @@ static void frames(void)
         }
         if (f.flags & AAP_ENCRYPTED) {
             size_t n;
+            uint32_t t0 = time_us_32();
             int r = aa_tls_decrypt(&tls, f.payload, f.length, plain, sizeof plain, &n);
+            decrypt_us += time_us_32() - t0;
             if (r) {
                 fail("decrypting", r);
                 return;
             }
-            if (aap_assemble(&msg, f.flags, plain, (uint32_t)n) == 1)
+            if (AA_STREAM && state >= AUTHED)
+                session_frame(&f, plain, (uint32_t)n);
+            else if (aap_assemble(&msg, f.flags, plain, (uint32_t)n) == 1)
                 message(msg.buf, msg.len, f.channel);
             continue;
         }
@@ -198,12 +303,63 @@ static void frames(void)
     }
 }
 
+/* SDSTREAM: once a second, what came in that second. */
+static void stats(int final)
+{
+    uint32_t now = ms(), dt = now - t_stats;
+    const struct aa_hu_video *v = &hu.v;
+    if (!AA_STREAM || !authed)
+        return;
+    if (final) {
+        uint32_t secs = (now - t_video) / 1000;
+        if (state != STREAMING && !v->messages && !hu.audio_messages)
+            return;
+        printf("summary: %lu video frames (%lu key frames) in %lu s, %lu KB, largest %lu bytes, %lu acknowledged; "
+               "sound %lu KB in %lu messages; USB %lu KB; %lu ms decrypting\n",
+            (unsigned long)v->messages, (unsigned long)v->idr, (unsigned long)secs, (unsigned long)(v->bytes / 1024),
+            (unsigned long)v->largest, (unsigned long)v->acks, (unsigned long)(hu.audio_bytes / 1024),
+            (unsigned long)hu.audio_messages, (unsigned long)(usb_bytes / 1024),
+            (unsigned long)(decrypt_us / 1000));
+        return;
+    }
+    if (dt < 1000)
+        return;
+    if (state == STREAMING || sound_seen || usb_bytes != last.usb)
+        printf("%4lus: video %lu fps, %lu KB/s, %lu key; sound %lu KB/s; USB %lu KB/s, %lu frames; "
+               "decrypting %lu%% of the time; largest %lu bytes, %lu acks, %lu pings\n",
+            (unsigned long)((now - t_auth) / 1000), (unsigned long)((v->messages - last.messages) * 1000 / dt),
+            (unsigned long)((v->bytes - last.video) * 1000 / 1024 / dt), (unsigned long)(v->idr - last.idr),
+            (unsigned long)((hu.audio_bytes - last.audio) * 1000 / 1024 / dt),
+            (unsigned long)((usb_bytes - last.usb) * 1000 / 1024 / dt), (unsigned long)(frames_in - last.frames),
+            (unsigned long)((decrypt_us - last.decrypt) / 10 / dt), (unsigned long)v->largest,
+            (unsigned long)v->acks, (unsigned long)hu.pings);
+    last.usb = usb_bytes;
+    last.video = v->bytes;
+    last.audio = hu.audio_bytes;
+    last.decrypt = decrypt_us;
+    last.messages = v->messages;
+    last.idr = v->idr;
+    last.frames = frames_in;
+    t_stats = now;
+}
+
+static void reset_counts(void)
+{
+    usb_bytes = decrypt_us = 0;
+    frames_in = 0;
+    authed = sound_seen = 0;
+    t_auth = t_video = t_stats = ms();
+    last.usb = last.video = last.decrypt = last.audio = 0;
+    last.messages = last.idr = last.frames = 0;
+}
+
 static void core1(void)
 {
     tuh_init(0);
     for (;;) {
         tuh_task();
         if (!aoa_device && state != WAITING && state != SWITCHING) {
+            stats(1);
             if (state >= HANDSHAKE)
                 aa_tls_free(&tls);
             state = WAITING;
@@ -220,6 +376,7 @@ static void core1(void)
                 int n = aap_version_request(m);
                 aap_reader_init(&reader);
                 aap_assembler_init(&msg);
+                reset_counts();
                 if (aoa_open(daddr) || aoa_send(daddr, m, (uint32_t)n) || aoa_read(daddr)) {
                     fail("the accessory's endpoints did not work", 0);
                 } else {
@@ -236,18 +393,26 @@ static void core1(void)
             }
         }
         if (state >= VERSION && state != FAILED && aoa_in_done) {
+            uint32_t at, k, len = aoa_in_len;
             if (aoa_in_done < 0) {
                 fail("reading from the phone failed", 0);
                 continue;
             }
-            if (aap_feed(&reader, aoa_in, aoa_in_len)) {
-                fail("the phone's bytes make no frames", 0);
-                continue;
+            usb_bytes += len;
+            /* In pieces the reader has room for, the frames taken out
+             * between them. */
+            for (at = 0; at < len && state != FAILED; at += k) {
+                k = len - at < AAP_FEED_MAX ? len - at : AAP_FEED_MAX;
+                if (aap_feed(&reader, aoa_in + at, k)) {
+                    fail("the phone's bytes make no frames", 0);
+                    break;
+                }
+                frames();
             }
-            frames();
             if (state != FAILED && aoa_read(daddr))
                 fail("reading from the phone failed", 0);
         }
+        stats(0);
     }
 }
 
@@ -257,7 +422,14 @@ int main(void)
 {
     stdio_init_all();
     status_init(pio1, 0);
-    printf("\nsdhandshake: waiting for a phone on the USB port (a test certificate: expect the phone to refuse it)\n");
+    if (AA_STREAM)
+        printf("\nsdstream: waiting for a phone on the USB port (an 800x480 head unit with sound channels, "
+               "%d frame%s ahead of the acknowledgements)\n", AA_MAX_UNACKED, AA_MAX_UNACKED == 1 ? "" : "s");
+    else
+        printf("\nsdhandshake: waiting for a phone on the USB port (with a self-signed test certificate, "
+               "expect the phone to refuse it)\n");
+    printf("certificate: %s\n", HU_CERT_WIRE ? "dates with a time zone; mbedTLS parses a copy in UTC, the phone gets it as it is"
+                                             : "as given");
     multicore_launch_core1_with_stack(core1, core1_stack, sizeof core1_stack);
     for (;;) {
         status_tick();

@@ -1,5 +1,6 @@
 #include <string.h>
 #include "aa_tls.h"
+#include "mbedtls/platform.h"
 
 /* mbedTLS's socket, in memory. */
 static int send_cb(void *ctx, const unsigned char *buf, size_t len)
@@ -53,8 +54,8 @@ static int give(struct aa_tls *t, uint8_t *out, size_t cap, size_t *out_len)
     return 0;
 }
 
-int aa_tls_init(struct aa_tls *t, int server, const char *cert, size_t cert_len, const char *key, size_t key_len,
-                const char *ca, size_t ca_len)
+int aa_tls_init(struct aa_tls *t, int server, const char *cert, size_t cert_len, const uint8_t *wire, size_t wire_len,
+                const char *key, size_t key_len, const char *ca, size_t ca_len)
 {
     static const char who[] = "rnse sdbridge";
     int r;
@@ -70,6 +71,19 @@ int aa_tls_init(struct aa_tls *t, int server, const char *cert, size_t cert_len,
         return r;
     if ((r = mbedtls_x509_crt_parse(&t->crt, (const unsigned char *)cert, cert_len)))
         return r;
+    if (wire) {
+        /* mbedTLS sends crt.raw as the Certificate message.  The parsed
+         * fields point into the old raw bytes, which are kept until
+         * aa_tls_free; mbedtls_x509_crt_free frees the new ones (they are
+         * the certificate's own buffer, own_buffer set by the parse). */
+        unsigned char *p = mbedtls_calloc(1, wire_len);
+        if (!p)
+            return MBEDTLS_ERR_X509_ALLOC_FAILED;
+        memcpy(p, wire, wire_len);
+        t->parsed_raw = t->crt.raw.p;
+        t->crt.raw.p = p;
+        t->crt.raw.len = wire_len;
+    }
     if ((r = mbedtls_pk_parse_key(&t->key, (const unsigned char *)key, key_len, NULL, 0)))
         return r;
     if ((r = mbedtls_ssl_config_defaults(&t->conf, server ? MBEDTLS_SSL_IS_SERVER : MBEDTLS_SSL_IS_CLIENT,
@@ -99,6 +113,9 @@ void aa_tls_free(struct aa_tls *t)
     mbedtls_ssl_free(&t->ssl);
     mbedtls_ssl_config_free(&t->conf);
     mbedtls_x509_crt_free(&t->crt);
+    if (t->parsed_raw)
+        mbedtls_free(t->parsed_raw);
+    t->parsed_raw = NULL;
     mbedtls_x509_crt_free(&t->ca);
     mbedtls_pk_free(&t->key);
     mbedtls_ctr_drbg_free(&t->drbg);

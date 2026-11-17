@@ -18,13 +18,19 @@
 #include "mbedtls/x509_crt.h"
 #include "mbedtls/pk.h"
 
-#define AA_TLS_BUF 16384
+/* A record of 16 KiB of plain text and what TLS adds to it (29 bytes
+ * for AES-GCM, more for CBC with its MAC and padding): an encrypted
+ * frame's payload can be that long. */
+#define AA_TLS_BUF (16384 + 512)
 
 struct aa_tls {
     mbedtls_ssl_context ssl;
     mbedtls_ssl_config conf;
     mbedtls_x509_crt crt, ca;
     mbedtls_pk_context key;
+    /* The parsed certificate's own bytes, when crt.raw has been replaced
+     * by the certificate as the phone is to see it (aa_tls_init). */
+    unsigned char *parsed_raw;
     mbedtls_ctr_drbg_context drbg;
     mbedtls_entropy_context entropy;
     /* Bytes from the other side not yet taken by mbedTLS, and bytes
@@ -37,12 +43,14 @@ struct aa_tls {
 };
 
 /* The certificate and key in PEM, each with its terminating zero counted
- * in its length (as mbedTLS wants PEM).  server: the other side's role,
- * for the host test; then ca (also PEM), when not null, is the only
- * authority whose client certificates it accepts.  0, or mbedTLS's
- * error. */
-int aa_tls_init(struct aa_tls *t, int server, const char *cert, size_t cert_len, const char *key, size_t key_len,
-                const char *ca, size_t ca_len);
+ * in its length (as mbedTLS wants PEM).  wire, when not null, is the
+ * certificate (DER) as it is to be sent, where cert is a copy that
+ * mbedTLS can parse (sdbridge/pem2c.py: dates with a time zone).
+ * server: the other side's role, for the host test; then ca (also PEM),
+ * when not null, is the only authority whose client certificates it
+ * accepts.  0, or mbedTLS's error. */
+int aa_tls_init(struct aa_tls *t, int server, const char *cert, size_t cert_len, const uint8_t *wire, size_t wire_len,
+                const char *key, size_t key_len, const char *ca, size_t ca_len);
 void aa_tls_free(struct aa_tls *t);
 
 /* A step of the handshake: the bytes of a handshake message from the

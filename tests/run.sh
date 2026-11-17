@@ -5,7 +5,8 @@
 # checksums, on the host's C compiler.  piosim.py: the PIO programs as
 # pioasm made them (sdbridge/out/sd.pio.h, from sdbridge/build.sh)
 # against an SD host's waveforms.  tls_host.c: TLS in Android Auto's
-# frames against a stand-in phone.  tests/linkbench.rs has another, with
+# frames against a stand-in phone, the session after it (src/aa_hu.c),
+# and a certificate with a time zone in its dates (tzcert.py, pem2c.py).  tests/linkbench.rs has another, with
 # the volume on the emulated 192.
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
@@ -24,8 +25,13 @@ if [ -f "$mbedtls/library/aes.c" ] && command -v openssl >/dev/null 2>&1; then
         [ -f "$certs/$who.crt" ] || openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj "/CN=rnse test $who" \
             -keyout "$certs/$who.key" -out "$certs/$who.crt" 2>/dev/null
     done
-    ${CC:-cc} -O2 -DAA_TLS_HOST_TEST '-DMBEDTLS_CONFIG_FILE="mbedtls_config.h"' -I"$src" -I"$mbedtls/include" \
-        -o "$here/../work/tls_host" "$here/tls_host.c" "$src/aa_tls.c" "$src/aap.c" "$mbedtls"/library/*.c
+    # A head unit certificate whose dates have a time zone, and the
+    # header sdbridge/pem2c.py makes of it (its UTC copy and the original).
+    [ -f "$certs/hu-tz.crt" ] || python3 -I "$here/tzcert.py" "$certs/hu.crt" "$certs/hu-tz.crt"
+    python3 -I "$here/../pem2c.py" "$certs/hu-tz.crt" "$certs/hu.key" "$certs/hu_tz.h" >/dev/null
+    ${CC:-cc} -O2 -Wall -Wextra -Wno-unused-parameter -DAA_TLS_HOST_TEST '-DMBEDTLS_CONFIG_FILE="mbedtls_config.h"' \
+        "-DHU_TZ_HEADER=\"$certs/hu_tz.h\"" -I"$src" -I"$mbedtls/include" \
+        -o "$here/../work/tls_host" "$here/tls_host.c" "$src/aa_tls.c" "$src/aa_hu.c" "$src/aap.c" "$mbedtls"/library/*.c
     "$here/../work/tls_host" "$certs"
 else
     echo "tls: no mbedTLS in the pico-sdk (run sdbridge/build.sh) or no openssl: not run"

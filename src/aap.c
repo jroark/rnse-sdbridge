@@ -170,3 +170,58 @@ int aap_pb_next(const uint8_t *p, uint32_t n, uint32_t *at, struct aap_pb_field 
     }
     return -1;
 }
+
+void aap_pb_init(struct aap_pb *b, uint8_t *p, uint32_t cap)
+{
+    b->p = p;
+    b->len = 0;
+    b->cap = cap;
+    b->err = 0;
+}
+
+static void put(struct aap_pb *b, uint8_t c)
+{
+    if (b->len >= b->cap) {
+        b->err = 1;
+        return;
+    }
+    b->p[b->len++] = c;
+}
+
+static void put_varint(struct aap_pb *b, uint64_t v)
+{
+    while (v >= 0x80) {
+        put(b, (uint8_t)(v | 0x80));
+        v >>= 7;
+    }
+    put(b, (uint8_t)v);
+}
+
+void aap_pb_id(struct aap_pb *b, uint16_t id)
+{
+    put(b, (uint8_t)(id >> 8));
+    put(b, (uint8_t)id);
+}
+
+void aap_pb_varint(struct aap_pb *b, uint32_t field, uint64_t v)
+{
+    put_varint(b, (uint64_t)field << 3);
+    put_varint(b, v);
+}
+
+void aap_pb_bytes(struct aap_pb *b, uint32_t field, const void *p, uint32_t n)
+{
+    const uint8_t *q = p;
+    put_varint(b, (uint64_t)field << 3 | 2);
+    put_varint(b, n);
+    while (n--)
+        put(b, *q++);
+}
+
+void aap_pb_string(struct aap_pb *b, uint32_t field, const char *s)
+{
+    uint32_t n = 0;
+    while (s[n])
+        n++;
+    aap_pb_bytes(b, field, s, n);
+}

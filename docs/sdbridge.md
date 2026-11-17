@@ -289,6 +289,22 @@ Android Auto's frames, mbedTLS on the RP2040 (its memory, and how long
 each step takes on a Cortex-M0+), and the phone's answer, which is a TLS
 alert; the session ends there.
 
+**With a certificate the phone accepts** (user-supplied, kept outside
+the repository like the stand-in and never committed) the handshake
+completes, and the firmware goes on to "authentication complete" and
+the phone's service discovery request.  `SDSTREAM.UF2` (below) carries
+on from there.
+
+Some head unit certificates give their dates with a time zone (a
+UTCTime such as `140704000000-0700`).  RFC 5280 does not allow that and
+mbedTLS refuses to parse them (`MBEDTLS_ERR_X509_INVALID_DATE`); phones
+accept them.  `pem2c.py` notices this and puts two forms in the header:
+a copy with the dates in UTC and the lengths around them mended, for
+mbedTLS to parse (its signature no longer matches, but the head unit
+does not verify its own certificate), and the certificate as it was.
+`aa_tls_init` replaces the parsed certificate's raw bytes with the
+original, so the phone gets the original bytes.
+
 ### Making the stand-in
 
 Anywhere outside the repository, with OpenSSL (or LibreSSL, as macOS
@@ -368,6 +384,100 @@ certificates are made by OpenSSL for the test only, in
 
 Not tested: the firmware on a board, how long the steps take there, and
 a real phone's answer.
+
+## The phone's video: `SDSTREAM.UF2`
+
+The fourth desk test is the handshake firmware built with
+`AA_STREAM=1` (`src/sdhandshake.c`), carrying on as a head unit
+(`src/aa_hu.c`):
+
+* it answers the service discovery request with three channels, as
+  aasdk numbers them: input (1, an 800x480 touch screen and a few keys),
+  sensors (2, driving status and night mode) and video (3, 800x480 at
+  30 frames a second, 140 dpi).  It offers no sound channel, so the phone
+  keeps its sound;
+* it opens the channels the phone asks for and refuses the others;
+* it answers a sensor start with the first value (unrestricted, day), and
+  input binding, pings, audio and navigation focus as aasdk's head unit
+  does;
+* it sets up the video channel, with `AA_MAX_UNACKED` frames allowed
+  ahead of the acknowledgements (1 by default, as aasdk has it;
+  `AA_MAX_UNACKED=4 sdbridge/build.sh` for more), and gives it focus;
+* it acknowledges each video message once its last frame is in.  The
+  messages are counted, never assembled: a key frame can be larger than
+  the RP2040 has room for.
+
+It reads the USB 16 KiB at a time.  The buffers are sized for frames of
+16 KiB of plain text in a TLS record, which is what the phone sends.
+The log (GP0, 115200 baud) has the handshake as above and then:
+
+```
+the phone's service discovery request: name "..." brand "..."
+service discovery response: ... bytes, channels input 1, sensors 2, video 3 (800x480)
+channel 2 open (priority 0): ok
+sensor start: type 13 (driving status)
+channel 3 open (priority 0): ok
+video setup request (configuration 0): ok, 1 frames ahead of the acknowledgements
+video start: session ..., configuration 0
+video frames arriving, ... ms after authentication
+codec configuration (... bytes): 00 00 00 01 67 ...
+H.264 profile 66 (Baseline), constraints .., level 3.1
+  12s: video 30 fps, 150 KB/s, 0 key; USB 152 KB/s, 60 frames; decrypting 20% of the time; ...
+summary: ... video frames (... key frames) in ... s, ... KB, ...
+```
+
+The numbers in that example are made up, not measured.  Each second's
+line gives the phone's video rate through the RP2040's full-speed USB
+(frames, KB/s, key frames), the raw USB rate, and the share of the
+Pico's time spent decrypting.  That share is what it would cost the
+RP2040 to hand the 192 plain text.  The profile line matters for the
+192's decoder, which takes Baseline only.  The LED is green once video
+arrives.
+
+**Seen on hardware, 2026-11-16** (a Raspberry Pi Pico, a Pixel 11 Pro XL
+with Android Auto's protocol 1.7, the log on GP0 and the phone's own
+through adb over Wi-Fi):
+
+* The handshake: the phone accepted the head unit certificate and agreed
+  ECDHE-RSA with AES-128-GCM.  The Pico's slow step, the key exchange
+  and the signature with the head unit's key, took 4.0 s, and the phone
+  waited for it.
+* With only input, sensors and video in the service discovery response,
+  the phone ended the session at once ("startRequiredServices failed",
+  right after its audio set-up): a phone of 2026 wants the sound
+  channels and a microphone.  With them (`aa_hu.c` now offers all seven),
+  every channel opened, the phone showed its "Welcome to Android Auto"
+  prompt, and after it the session was connected and Maps projected on
+  an 800x480 screen at 140 dpi.
+* The stream is **H.264 Baseline, level 3.1** (constraint flags 0x40),
+  which is what the 192's decoder (h264bsd) takes.  Key frames were up
+  to 77 KB.
+* The video configuration's frame rate value 1, which aasdk calls 30
+  frames a second, gave up to 58 frames a second: current phones read
+  1 as 60 and 2 as 30.
+* **The link was the limit.**  TinyUSB's RP2040 host ran the
+  accessory's bulk endpoints on the controller's polled "interrupt"
+  endpoints, one 64-byte packet per 1 ms frame: 56 KB/s in all, the
+  phone's sound at 459 kbps of the 1536 it needs (147 ms an
+  acknowledgement), and the video stopped.
+  `patches/tinyusb-rp2040-host-bulk-epx.patch` (applied by `build.sh`)
+  runs bulk transfers on EPX instead, a packet a transaction, started
+  again from the interrupt.  With it the USB carried a steady **310 to
+  320 KB/s**: the phone's sound at its full 1574 kbps (41 ms an
+  acknowledgement) and video at 45 to 48 frames a second (about 115
+  KB/s), the two trading places when the picture changed a lot (then
+  video 200 to 290 KB/s and the sound short).
+* Decrypting took **64 to 66 % of the Pico's time** at 310 KB/s (AES-128-
+  GCM in mbedTLS on a Cortex-M0+ at 200 MHz): about 480 KB/s would take
+  all of it.
+
+Tested on the host (`tests/tls_host.c`): a stand-in phone goes through
+the whole session in real frames and encryption: discovery (the
+response's channels and video configuration read back), the channels
+opened and a fourth refused, driving status, input binding, video
+setup, focus and start, a codec configuration (its profile and level
+read), a 40 KiB key frame over three frames with one acknowledgement
+after the last, an ordinary frame, focus again, a ping and audio focus.
 
 ## Next
 

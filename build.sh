@@ -9,13 +9,15 @@
 #
 # The pico-sdk (BSD-3) and the TinyUSB it uses (MIT) are not kept in
 # the repository: they are cloned, pinned and checked against their
-# commits, into sdbridge/work/.  PICO_SDK_PATH=DIR takes an SDK from
+# commits, into sdbridge/work/, and TinyUSB gets sdbridge/patches/.  PICO_SDK_PATH=DIR takes an SDK from
 # elsewhere (not checked).  Needs git, cmake, a host C compiler (for the
 # SDK's pioasm) and arm-none-eabi-gcc with newlib.
 #
 # SYS_KHZ=250000 for a faster processor clock (200 MHz by default).
 # AA_CERT=CERT.pem AA_KEY=KEY.pem (both outside the repository) builds
-# the handshake desk test too, SDHANDSHAKE.UF2 (docs/sdbridge.md).
+# the handshake desk test too, SDHANDSHAKE.UF2, and the video stream's,
+# SDSTREAM.UF2 (docs/sdbridge.md); AA_MAX_UNACKED=N for the frames the
+# phone may send in SDSTREAM ahead of the acknowledgements (1).
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
 work=$here/work
@@ -41,6 +43,13 @@ if [ -z "$PICO_SDK_PATH" ]; then
         git -C "$PICO_SDK_PATH" submodule update -q --init --depth 1 lib/tinyusb
     fi
     [ "$(git -C "$PICO_SDK_PATH/lib/tinyusb" rev-parse HEAD)" = "$tusb_commit" ] || { echo "tinyusb: not commit $tusb_commit" >&2; exit 1; }
+    # TinyUSB's RP2040 host runs bulk endpoints on the controller's polled
+    # "interrupt" endpoints, a 64-byte packet a millisecond (64 KB/s, seen
+    # with a phone): patches/ runs them on EPX instead (docs/sdbridge.md).
+    for p in "$here"/patches/tinyusb-*.patch; do
+        git -C "$PICO_SDK_PATH/lib/tinyusb" apply --reverse --check "$p" 2>/dev/null ||
+            git -C "$PICO_SDK_PATH/lib/tinyusb" apply "$p" || { echo "tinyusb: $p does not apply" >&2; exit 1; }
+    done
 fi
 
 # The handshake desk test only with a certificate and key from outside
@@ -65,14 +74,17 @@ for board in waveshare_rp2040_zero pico; do
     esac
     mkdir -p "$dest"
     cmake -S "$here" -B "$build" -DPICO_SDK_PATH="$PICO_SDK_PATH" -DPICO_BOARD=$board \
-        -DCMAKE_BUILD_TYPE=Release ${SYS_KHZ:+-DCMAKE_C_FLAGS=-DSYS_KHZ=$SYS_KHZ} -UAA_CERT_HEADER $cert_cmake >/dev/null
+        -DCMAKE_BUILD_TYPE=Release ${SYS_KHZ:+-DCMAKE_C_FLAGS=-DSYS_KHZ=$SYS_KHZ} -UAA_CERT_HEADER $cert_cmake \
+        -DAA_MAX_UNACKED=${AA_MAX_UNACKED:-1} >/dev/null
     cmake --build "$build" -j4
     python3 -I "$here/uf2.py" "$build/sdbridge.bin" "$dest/SDBRIDGE.UF2"
     python3 -I "$here/uf2.py" "$build/sdphone.bin" "$dest/SDPHONE.UF2"
     if [ -n "$cert_cmake" ]; then
         python3 -I "$here/uf2.py" "$build/sdhandshake.bin" "$dest/SDHANDSHAKE.UF2"
+        python3 -I "$here/uf2.py" "$build/sdstream.bin" "$dest/SDSTREAM.UF2"
+        arm-none-eabi-size "$build/sdstream.elf" "$build/sdhandshake.elf" | sed "s|$build/||"
     else
-        rm -f "$dest/SDHANDSHAKE.UF2"
+        rm -f "$dest/SDHANDSHAKE.UF2" "$dest/SDSTREAM.UF2"
     fi
     cp "$build/sdbridge.elf" "$dest/sdbridge.elf"
     cp "$build/sdphone.elf" "$dest/sdphone.elf"

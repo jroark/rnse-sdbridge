@@ -1,7 +1,7 @@
 /* The phone over USB, the RP2040 its host (TinyUSB): Android Open
  * Accessory's switch, as an Android Auto head unit makes it, and the
  * accessory's two bulk endpoints.  Shared by the desk tests
- * (sdphone.c, sdhandshake.c). */
+ * (sdphone.c, sdhandshake.c and sdstream). */
 #ifndef AOA_H
 #define AOA_H
 #include <stdint.h>
@@ -20,8 +20,14 @@ int aoa_switch(uint8_t daddr);
 int aoa_open(uint8_t daddr);
 
 /* Bytes from the phone: aoa_read starts a transfer; when it completes,
- * aoa_in_done is 1 (aoa_in_len bytes in aoa_in) or -1 (failed). */
-extern uint8_t aoa_in[512];
+ * aoa_in_done is 1 (aoa_in_len bytes in aoa_in) or -1 (failed).  A
+ * transfer ends with the phone's short packet or a full buffer, so a
+ * larger AOA_IN_SIZE (sdstream: 16 KiB) takes many 64-byte packets at
+ * once. */
+#ifndef AOA_IN_SIZE
+#define AOA_IN_SIZE 512
+#endif
+extern uint8_t aoa_in[AOA_IN_SIZE];
 extern volatile int aoa_in_done;
 extern volatile uint32_t aoa_in_len;
 int aoa_read(uint8_t daddr);

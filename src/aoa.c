@@ -85,7 +85,7 @@ int aoa_switch(uint8_t daddr)
 }
 
 static uint8_t ep_in, ep_out;
-uint8_t aoa_in[512] __attribute__((aligned(4)));
+uint8_t aoa_in[AOA_IN_SIZE] __attribute__((aligned(4)));
 volatile int aoa_in_done;
 volatile uint32_t aoa_in_len;
 static volatile int out_done;

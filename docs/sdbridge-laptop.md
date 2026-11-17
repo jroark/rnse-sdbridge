@@ -46,7 +46,8 @@ for the Raspberry Pi Pico in `sdbridge/out/pico/`:
 |---|---|
 | `SDBRIDGE.UF2` | the board as a read-only SD card for the 192 (`LINKTEST.BIN` on it), for `linkbench` |
 | `SDPHONE.UF2` | the phone on the desk: accessory mode and Android Auto's version exchange (works: seen 2026-11-17) |
-| `SDHANDSHAKE.UF2` | the TLS handshake with a test certificate; only built when given one (below) |
+| `SDHANDSHAKE.UF2` | the TLS handshake with the certificate it is given; only built when given one (below) |
+| `SDSTREAM.UF2` | the same, then a head unit: the phone's video counted and acknowledged, its rate logged each second; built with `SDHANDSHAKE.UF2` |
 
 ### The test certificate for `SDHANDSHAKE.UF2`
 
@@ -115,11 +116,17 @@ screen /dev/ttyUSB0 115200                  # Linux
 * The TLS handshake (`SDHANDSHAKE.UF2`): written and tested on the host
   against a stand-in phone.  **Not yet run on the board.**  With a test
   certificate the real phone ends it with an alert by design.
+* The phone's video (`SDSTREAM.UF2`): **works** on a Pico with a real
+  phone (2026-11-16, with a certificate the phone accepts): Android
+  Auto projects at 800x480, H.264 Baseline 3.1, sound at its full rate
+  and video at up to 48 frames a second, through about 310 KB/s of USB
+  once TinyUSB's host runs bulk on EPX (`patches/`).  Numbers in
+  [sdbridge.md](sdbridge.md).
 
 ## What to do next
 
-1. Flash `SDHANDSHAKE.UF2` (with your own test certificate) and note
-   the log: the time of each step and the phone's alert number.
+1. Ask the phone for 30 frames a second (value 2 in the video
+   configuration), and see how far USB goes with EPX double-buffered.
 2. Run `linkbench` on the unit with an ordinary card and `LINKTEST.BIN`
    (`python3 tools/linktest.py > LINKTEST.BIN`): the slot's real rates.
 3. Run `SDBRIDGE.UF2` in the slot on the ribbon (wiring in

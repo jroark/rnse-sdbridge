@@ -341,6 +341,63 @@ static void test_aap(void)
         CHECK(aap_feed(&r, stream + (i < 4 ? i : 4), 1) == 0);
     CHECK(aap_next(&r, &f) == 0);
     CHECK(aap_feed(&r, stream, 1) == -1);
+    /* The longest encrypted frame (16 KiB of video in an AES-GCM record:
+     * 29 bytes more), a frame after it, in pieces as large as the
+     * firmware feeds them, the frames taken out between pieces. */
+    {
+        static uint8_t big[8 + 16384 + 29 + 6];
+        uint32_t len = 16384 + 29, at;
+        int got = 0;
+        big[0] = 3;
+        big[1] = AAP_FIRST | AAP_ENCRYPTED;
+        big[2] = (uint8_t)(len >> 8);
+        big[3] = (uint8_t)len;
+        big[4] = 0;
+        big[5] = 1;
+        for (at = 0; at < len; at++)
+            big[8 + at] = (uint8_t)(at * 7);
+        big[8 + len] = 3;
+        big[8 + len + 1] = AAP_LAST | AAP_ENCRYPTED;
+        big[8 + len + 3] = 2;
+        aap_reader_init(&r);
+        for (at = 0; at < sizeof big; at += AAP_FEED_MAX) {
+            uint32_t k = sizeof big - at < AAP_FEED_MAX ? sizeof big - at : AAP_FEED_MAX;
+            CHECK(aap_feed(&r, big + at, k) == 0);
+            while (aap_next(&r, &f)) {
+                if (got == 0)
+                    CHECK(f.length == len && f.payload[0] == 0 && f.payload[len - 1] == (uint8_t)((len - 1) * 7));
+                else
+                    CHECK(f.length == 2 && (f.flags & AAP_LAST));
+                got++;
+            }
+        }
+        CHECK(got == 2);
+    }
+    /* The protocol buffer writer, read back by the reader. */
+    {
+        uint8_t buf[64], inner[16];
+        struct aap_pb b, in;
+        struct aap_pb_field fl;
+        uint32_t at = 2;
+        aap_pb_init(&in, inner, sizeof inner);
+        aap_pb_varint(&in, 1, 800);
+        aap_pb_init(&b, buf, sizeof buf);
+        aap_pb_id(&b, AAP_SERVICE_DISCOVERY_RESPONSE);
+        aap_pb_varint(&b, 1, 3);
+        aap_pb_bytes(&b, 4, inner, in.len);
+        aap_pb_string(&b, 2, "RNS-E");
+        aap_pb_varint(&b, 13, 0x123456789ull);
+        CHECK(!b.err && buf[0] == 0 && buf[1] == 6);
+        CHECK(aap_pb_next(buf, b.len, &at, &fl) == 1 && fl.number == 1 && fl.type == 0 && fl.value == 3);
+        CHECK(aap_pb_next(buf, b.len, &at, &fl) == 1 && fl.number == 4 && fl.type == 2 && fl.len == 3);
+        CHECK(fl.bytes[0] == 0x08 && fl.bytes[1] == 0xa0 && fl.bytes[2] == 0x06);
+        CHECK(aap_pb_next(buf, b.len, &at, &fl) == 1 && fl.number == 2 && fl.len == 5 && memcmp(fl.bytes, "RNS-E", 5) == 0);
+        CHECK(aap_pb_next(buf, b.len, &at, &fl) == 1 && fl.number == 13 && fl.value == 0x123456789ull);
+        CHECK(aap_pb_next(buf, b.len, &at, &fl) == 0);
+        aap_pb_init(&b, buf, 4);
+        aap_pb_string(&b, 2, "too long");
+        CHECK(b.err && b.len == 4);
+    }
 }
 
 int main(int argc, char **argv)

@@ -1,0 +1,218 @@
+diff --git a/src/portable/raspberrypi/rp2040/hcd_rp2040.c b/src/portable/raspberrypi/rp2040/hcd_rp2040.c
+index 2c0a3fd..23ccf9d 100644
+--- a/src/portable/raspberrypi/rp2040/hcd_rp2040.c
++++ b/src/portable/raspberrypi/rp2040/hcd_rp2040.c
+@@ -56,6 +56,23 @@ static_assert(PICO_USB_HOST_INTERRUPT_ENDPOINTS <= USB_MAX_ENDPOINTS, "");
+ static struct hw_endpoint ep_pool[1 + PICO_USB_HOST_INTERRUPT_ENDPOINTS];
+ #define epx (ep_pool[0])
+ 
++// rnse sdbridge patch: bulk endpoints run on EPX, one transfer at a time,
++// instead of on the "interrupt" endpoints, which the controller polls once
++// per 1 ms frame (64 bytes a millisecond).  Each has its own struct (its
++// data toggle) pointing at EPX's registers; epx_cur is the one EPX runs.
++// Each packet is a transfer of its own (LAST set, rp2040_usb.c), started
++// again from the interrupt until the transfer is done or short.
++#ifndef PICO_USB_HOST_BULK_ENDPOINTS
++#define PICO_USB_HOST_BULK_ENDPOINTS 4
++#endif
++static struct hw_endpoint bulk_pool[PICO_USB_HOST_BULK_ENDPOINTS];
++static struct hw_endpoint *epx_cur = &epx;
++
++TU_ATTR_ALWAYS_INLINE static inline bool is_bulk_ep(struct hw_endpoint const *ep)
++{
++  return ep >= bulk_pool && ep < bulk_pool + PICO_USB_HOST_BULK_ENDPOINTS;
++}
++
+ // Flags we set by default in sie_ctrl (we add other bits on top)
+ enum {
+   SIE_CTRL_BASE = USB_SIE_CTRL_SOF_EN_BITS      | USB_SIE_CTRL_KEEP_ALIVE_EN_BITS |
+@@ -73,6 +90,12 @@ static struct hw_endpoint *get_dev_ep(uint8_t dev_addr, uint8_t ep_addr)
+     if ( ep->configured && (ep->dev_addr == dev_addr) && (ep->ep_addr == ep_addr) ) return ep;
+   }
+ 
++  for ( uint32_t i = 0; i < PICO_USB_HOST_BULK_ENDPOINTS; i++ )
++  {
++    struct hw_endpoint *ep = &bulk_pool[i];
++    if ( ep->configured && (ep->dev_addr == dev_addr) && (ep->ep_addr == ep_addr) ) return ep;
++  }
++
+   return NULL;
+ }
+ 
+@@ -95,9 +118,22 @@ static void __tusb_irq_path_func(hw_xfer_complete)(struct hw_endpoint *ep, xfer_
+   uint8_t ep_addr = ep->ep_addr;
+   uint xferred_len = ep->xferred_len;
+   hw_endpoint_reset_transfer(ep);
++  if ( ep == epx_cur ) epx_cur = &epx;
+   hcd_event_xfer_complete(dev_addr, ep_addr, xferred_len, xfer_result, true);
+ }
+ 
++// Start (or start again) a transaction on EPX for ep.
++static void __tusb_irq_path_func(epx_start_trans)(struct hw_endpoint *ep)
++{
++  uint32_t flags = USB_SIE_CTRL_START_TRANS_BITS | SIE_CTRL_BASE |
++                   (ep->rx ? USB_SIE_CTRL_RECEIVE_DATA_BITS : USB_SIE_CTRL_SEND_DATA_BITS) |
++                   (need_pre(ep->dev_addr) ? USB_SIE_CTRL_PREAMBLE_EN_BITS : 0);
++  // As hcd_edpt_xfer: everything but START_TRANS first, then START_TRANS.
++  usb_hw->sie_ctrl = flags & ~USB_SIE_CTRL_START_TRANS_BITS;
++  busy_wait_at_least_cycles(12);
++  usb_hw->sie_ctrl = flags;
++}
++
+ static void __tusb_irq_path_func(_handle_buff_status_bit)(uint bit, struct hw_endpoint *ep)
+ {
+   usb_hw_clear->buf_status = bit;
+@@ -108,6 +144,11 @@ static void __tusb_irq_path_func(_handle_buff_status_bit)(uint bit, struct hw_en
+   {
+     hw_xfer_complete(ep, XFER_RESULT_SUCCESS);
+   }
++  else if ( is_bulk_ep(ep) )
++  {
++    // The next packet's buffer is armed: its transaction.
++    epx_start_trans(ep);
++  }
+ }
+ 
+ static void __tusb_irq_path_func(hw_handle_buff_status)(void)
+@@ -120,7 +161,7 @@ static void __tusb_irq_path_func(hw_handle_buff_status)(void)
+   if ( remaining_buffers & bit )
+   {
+     remaining_buffers &= ~bit;
+-    struct hw_endpoint * ep = &epx;
++    struct hw_endpoint * ep = epx_cur;
+ 
+     uint32_t ep_ctrl = *ep->endpoint_control;
+     if ( ep_ctrl & EP_CTRL_DOUBLE_BUFFERED_BITS )
+@@ -213,7 +254,7 @@ static void __tusb_irq_path_func(hcd_rp2040_irq)(void)
+     pico_trace("Stall REC\n");
+     handled |= USB_INTS_STALL_BITS;
+     usb_hw_clear->sie_status = USB_SIE_STATUS_STALL_REC_BITS;
+-    hw_xfer_complete(&epx, XFER_RESULT_STALLED);
++    hw_xfer_complete(epx_cur, XFER_RESULT_STALLED);
+   }
+ 
+   if ( status & USB_INTS_BUFF_STATUS_BITS )
+@@ -278,6 +319,22 @@ static struct hw_endpoint *_hw_endpoint_allocate(uint8_t transfer_type)
+ {
+   struct hw_endpoint * ep = NULL;
+ 
++  if ( transfer_type == TUSB_XFER_BULK )
++  {
++    for ( uint i = 0; i < PICO_USB_HOST_BULK_ENDPOINTS; i++ )
++    {
++      if ( !bulk_pool[i].configured )
++      {
++        ep = &bulk_pool[i];
++        ep->buffer_control = &usbh_dpram->epx_buf_ctrl;
++        ep->endpoint_control = &usbh_dpram->epx_ctrl;
++        ep->hw_data_buf = &usbh_dpram->epx_data[0];
++        return ep;
++      }
++    }
++    return NULL;
++  }
++
+   if ( transfer_type != TUSB_XFER_CONTROL )
+   {
+     // Note: even though datasheet name these "Interrupt" endpoints. These are actually
+@@ -325,6 +382,13 @@ static void _hw_endpoint_init(struct hw_endpoint *ep, uint8_t dev_addr, uint8_t
+   ep->wMaxPacketSize = wMaxPacketSize;
+   ep->transfer_type = transfer_type;
+ 
++  if ( is_bulk_ep(ep) )
++  {
++    // EPX's registers are set up for each transfer (hcd_edpt_xfer).
++    ep->configured = true;
++    return;
++  }
++
+   pico_trace("hw_endpoint_init dev %d ep %02X xfer %d\n", ep->dev_addr, ep->ep_addr, ep->transfer_type);
+   pico_trace("dev %d ep %02X setup buffer @ 0x%p\n", ep->dev_addr, ep->ep_addr, ep->hw_data_buf);
+   uint dpram_offset = hw_data_offset(ep->hw_data_buf);
+@@ -394,6 +458,8 @@ bool hcd_init(uint8_t rhport, const tusb_rhport_init_t* rh_init) {
+ 
+   // clear epx and interrupt eps
+   memset(&ep_pool, 0, sizeof(ep_pool));
++  memset(&bulk_pool, 0, sizeof(bulk_pool));
++  epx_cur = &epx;
+ 
+   // Enable in host mode with SOF / Keep alive on
+   usb_hw->main_ctrl = USB_MAIN_CTRL_CONTROLLER_EN_BITS | USB_MAIN_CTRL_HOST_NDEVICE_BITS;
+@@ -483,6 +549,23 @@ void hcd_device_close(uint8_t rhport, uint8_t dev_addr)
+       hw_endpoint_reset_transfer(ep);
+     }
+   }
++
++  for (size_t i = 0; i < PICO_USB_HOST_BULK_ENDPOINTS; i++)
++  {
++    hw_endpoint_t* ep = &bulk_pool[i];
++
++    if (ep->dev_addr == dev_addr && ep->configured)
++    {
++      if (ep == epx_cur)
++      {
++        // A transfer it had on EPX goes with it.
++        *ep->buffer_control = 0;
++        epx_cur = &epx;
++      }
++      ep->configured = false;
++      hw_endpoint_reset_transfer(ep);
++    }
++  }
+ }
+ 
+ uint32_t hcd_frame_number(uint8_t rhport)
+@@ -559,8 +642,23 @@ bool hcd_edpt_xfer(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr, uint8_t *
+   // If a normal transfer (non-interrupt) then initiate using
+   // sie ctrl registers. Otherwise interrupt ep registers should
+   // already be configured
+-  if ( ep == &epx )
++  if ( is_bulk_ep(ep) )
+   {
++    // EPX is free only when neither a control transfer nor another bulk
++    // transfer has it.
++    if ( epx.active || (epx_cur != &epx && epx_cur->active) ) return false;
++    epx_cur = ep;
++    *ep->endpoint_control = EP_CTRL_ENABLE_BITS | EP_CTRL_INTERRUPT_PER_BUFFER |
++                            ((uint32_t) TUSB_XFER_BULK << EP_CTRL_BUFFER_TYPE_LSB) |
++                            hw_data_offset(ep->hw_data_buf);
++    hw_endpoint_xfer_start(ep, buffer, buflen);
++    usb_hw->dev_addr_ctrl = (uint32_t) (dev_addr | (ep_num << USB_ADDR_ENDP_ENDPOINT_LSB));
++    epx_start_trans(ep);
++  }
++  else if ( ep == &epx )
++  {
++    if ( epx_cur != &epx && epx_cur->active ) return false;
++    epx_cur = &epx;
+     hw_endpoint_xfer_start(ep, buffer, buflen);
+ 
+     // That has set up buffer control, endpoint control etc
+@@ -602,6 +700,10 @@ bool hcd_setup_send(uint8_t rhport, uint8_t dev_addr, uint8_t const setup_packet
+     usbh_dpram->setup_packet[i] = setup_packet[i];
+   }
+ 
++  // Not while a bulk transfer has EPX.
++  if ( epx_cur != &epx && epx_cur->active ) return false;
++  epx_cur = &epx;
++
+   // Configure EP0 struct with setup info for the trans complete
+   struct hw_endpoint * ep = _hw_endpoint_allocate(0);
+   TU_ASSERT(ep);
+diff --git a/src/portable/raspberrypi/rp2040/rp2040_usb.c b/src/portable/raspberrypi/rp2040/rp2040_usb.c
+index 43f48da..902d09e 100644
+--- a/src/portable/raspberrypi/rp2040/rp2040_usb.c
++++ b/src/portable/raspberrypi/rp2040/rp2040_usb.c
+@@ -145,6 +145,13 @@ static uint32_t __tusb_irq_path_func(prepare_ep_buffer)(struct hw_endpoint* ep,
+   if (ep->remaining_len == 0) {
+     buf_ctrl |= USB_BUF_CTRL_LAST;
+   }
++#if CFG_TUH_ENABLED
++  // rnse sdbridge patch: host bulk runs on EPX a packet at a time
++  // (hcd_rp2040.c starts each one), so every buffer is the last.
++  if (is_host_mode() && ep->transfer_type == TUSB_XFER_BULK) {
++    buf_ctrl |= USB_BUF_CTRL_LAST;
++  }
++#endif
+ 
+   if (buf_id) buf_ctrl = buf_ctrl << 16;
+ 
