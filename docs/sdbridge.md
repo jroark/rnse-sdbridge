@@ -13,6 +13,8 @@ the bridge as it would a card, and says whether every word arrived.
 Not yet tried on a unit.  What has been tested without one is listed at
 the end, and so is what only a unit can say.
 
+To build and carry on from your own computer: [sdbridge-laptop.md](sdbridge-laptop.md).
+
 ## Wiring
 
 | SD card contact | Signal | RP2040-Zero |
