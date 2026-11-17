@@ -125,9 +125,11 @@ screen /dev/ttyUSB0 115200                  # Linux
 
 ## What to do next
 
-1. Decryption is the limit now (about 440 KB/s with the USB reads
-   overlapped): try `SYS_KHZ=250000`, then decryption on the second
-   core.
+1. Build the stream firmware with `SYS_KHZ=250000`: at 250 MHz the
+   phone's video and sound fit with room to spare (up to 660 KB/s of
+   USB).  Decryption on the second core is there if more is ever
+   needed.  Next is the bridge itself: the card firmware in the slot,
+   writes for the way back, and the two in one.
 2. Run `linkbench` on the unit with an ordinary card and `LINKTEST.BIN`
    (`python3 tools/linktest.py > LINKTEST.BIN`): the slot's real rates.
 3. Run `SDBRIDGE.UF2` in the slot on the ribbon (wiring in

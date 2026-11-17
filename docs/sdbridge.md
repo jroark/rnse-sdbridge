@@ -468,8 +468,11 @@ through adb over Wi-Fi):
   KB/s), the two trading places when the picture changed a lot (then
   video 200 to 290 KB/s and the sound short).
 * Decrypting took **64 to 66 % of the Pico's time** at 310 KB/s (AES-128-
-  GCM in mbedTLS on a Cortex-M0+ at 200 MHz): about 480 KB/s would take
-  all of it.
+  GCM in mbedTLS on a Cortex-M0+ at 125 MHz: until the 250 MHz run below
+  the handshake and stream firmwares did not set the clock, and the
+  pico-sdk leaves an RP2040 at 125 MHz; the handshake's 4.0 s and every
+  figure before that run are at 125 MHz): about 480 KB/s would take all
+  of it.
 * Asked for 30 frames a second (value 2), the phone sent 28 to 31 for
   100 s: 15 to 20 KB/s of video on a still map, up to 290 KB/s while
   panning, key frames up to 101 KB.  The sound kept its full rate
@@ -492,7 +495,15 @@ through adb over Wi-Fi):
   30 frames a second at 160 to 290 KB/s, and the sound near its full
   192 KB/s, where before the same pans cut it to 30 to 100.  Decrypting
   then took 84 to 91 % of the Pico's time: the decryption (about 440
-  KB/s on core 1, which also runs the USB) is the limit now.
+  KB/s on core 1, which also runs the USB) was the limit.
+* **At 250 MHz** (`SYS_KHZ=250000 sdbridge/build.sh`; the firmware now
+  sets the clock as `src/main.c` does, 200 MHz by default, at 1.15 V)
+  the handshake's slow step took 2.0 s, and the link stopped having a
+  ceiling of its own in a minute of Maps: USB up to **660 KB/s**, video
+  up to 524 KB/s while panning at 22 to 33 frames a second, and the
+  sound short of its rate in 3 seconds out of 80 (25 out of 95 before).
+  Decrypting took 34 to 45 % of the time in ordinary use and 79 % at the
+  peak: about 830 KB/s would take all of it, near the link's own 900.
 
 Tested on the host (`tests/tls_host.c`): a stand-in phone goes through
 the whole session in real frames and encryption: discovery (the

@@ -32,6 +32,8 @@
 #include <stdio.h>
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
+#include "hardware/clocks.h"
+#include "hardware/vreg.h"
 #include "tusb.h"
 #include "aap.h"
 #include "aoa.h"
@@ -51,6 +53,12 @@ extern volatile uint32_t rp2040_host_epx_short_lost;
 
 #ifndef AA_STREAM
 #define AA_STREAM 0
+#endif
+/* The processor's clock, as src/main.c sets it (sdbridge/build.sh
+ * SYS_KHZ=250000): TLS is most of the work here.  Without it the SDK
+ * leaves the RP2040 at 125 MHz. */
+#ifndef SYS_KHZ
+#define SYS_KHZ 200000
 #endif
 /* The video frames the phone may send ahead of the acknowledgements. */
 #ifndef AA_MAX_UNACKED
@@ -444,6 +452,10 @@ static uint32_t core1_stack[16384 / 4];
 
 int main(void)
 {
+    /* The clock first: the log's UART takes its baud rate from it. */
+    vreg_set_voltage(VREG_VOLTAGE_1_15);
+    sleep_ms(2);
+    set_sys_clock_khz(SYS_KHZ, true);
     stdio_init_all();
     status_init(pio1, 0);
 #if AA_STREAM
@@ -455,6 +467,7 @@ int main(void)
     printf("\nsdhandshake: waiting for a phone on the USB port (with a self-signed test certificate, "
            "expect the phone to refuse it)\n");
 #endif
+    printf("processor clock: %lu MHz\n", (unsigned long)(clock_get_hz(clk_sys) / 1000000));
     printf("certificate: %s\n", HU_CERT_WIRE ? "dates with a time zone; mbedTLS parses a copy in UTC, the phone gets it as it is"
                                              : "as given");
     multicore_launch_core1_with_stack(core1, core1_stack, sizeof core1_stack);

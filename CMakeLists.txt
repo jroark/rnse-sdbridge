@@ -5,6 +5,14 @@ include(${PICO_SDK_PATH}/pico_sdk_init.cmake)
 project(sdbridge C CXX ASM)
 pico_sdk_init()
 
+# The processor's clock for every firmware here (src/main.c, src/sdhandshake.c
+# set it): sdbridge/build.sh SYS_KHZ=250000.  A variable, not CMAKE_C_FLAGS,
+# which would replace the toolchain's processor flags.
+if (NOT SYS_KHZ)
+    set(SYS_KHZ 200000)
+endif()
+add_compile_definitions(SYS_KHZ=${SYS_KHZ})
+
 add_executable(sdbridge src/main.c src/card.c src/volume.c src/crc.c src/status.c)
 pico_generate_pio_header(sdbridge ${CMAKE_CURRENT_LIST_DIR}/src/sd.pio)
 target_compile_options(sdbridge PRIVATE -Wall -Wextra -O2)
@@ -44,7 +52,7 @@ if (AA_CERT_HEADER)
     pico_generate_pio_header(sdhandshake ${CMAKE_CURRENT_LIST_DIR}/src/sd.pio OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/handshake)
     target_include_directories(sdhandshake PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src ${AA_CERT_DIR})
     target_compile_options(sdhandshake PRIVATE -Wall -Wextra -O2)
-    target_link_libraries(sdhandshake pico_stdlib pico_multicore hardware_pio tinyusb_host pico_mbedtls)
+    target_link_libraries(sdhandshake pico_stdlib pico_multicore hardware_pio hardware_vreg tinyusb_host pico_mbedtls)
     pico_enable_stdio_usb(sdhandshake 0)
     pico_enable_stdio_uart(sdhandshake 1)
     add_custom_command(TARGET sdhandshake POST_BUILD
@@ -60,7 +68,7 @@ if (AA_CERT_HEADER)
     target_compile_options(sdstream PRIVATE -Wall -Wextra -O2)
     target_compile_definitions(sdstream PRIVATE AA_STREAM=1 AOA_IN_SIZE=16384 AAP_MESSAGE_MAX=16384
         AA_MAX_UNACKED=${AA_MAX_UNACKED})
-    target_link_libraries(sdstream pico_stdlib pico_multicore hardware_pio tinyusb_host pico_mbedtls)
+    target_link_libraries(sdstream pico_stdlib pico_multicore hardware_pio hardware_vreg tinyusb_host pico_mbedtls)
     pico_enable_stdio_usb(sdstream 0)
     pico_enable_stdio_uart(sdstream 1)
     add_custom_command(TARGET sdstream POST_BUILD
@@ -74,7 +82,7 @@ if (AA_CERT_HEADER)
     target_compile_options(sdstreamdb PRIVATE -Wall -Wextra -O2)
     target_compile_definitions(sdstreamdb PRIVATE AA_STREAM=1 AOA_IN_SIZE=16384 AAP_MESSAGE_MAX=16384
         AA_MAX_UNACKED=${AA_MAX_UNACKED} PICO_USB_HOST_BULK_DOUBLE_BUFFER=1)
-    target_link_libraries(sdstreamdb pico_stdlib pico_multicore hardware_pio tinyusb_host pico_mbedtls)
+    target_link_libraries(sdstreamdb pico_stdlib pico_multicore hardware_pio hardware_vreg tinyusb_host pico_mbedtls)
     pico_enable_stdio_usb(sdstreamdb 0)
     pico_enable_stdio_uart(sdstreamdb 1)
     add_custom_command(TARGET sdstreamdb POST_BUILD

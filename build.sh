@@ -74,7 +74,7 @@ for board in waveshare_rp2040_zero pico; do
     esac
     mkdir -p "$dest"
     cmake -S "$here" -B "$build" -DPICO_SDK_PATH="$PICO_SDK_PATH" -DPICO_BOARD=$board \
-        -DCMAKE_BUILD_TYPE=Release ${SYS_KHZ:+-DCMAKE_C_FLAGS=-DSYS_KHZ=$SYS_KHZ} -UAA_CERT_HEADER $cert_cmake \
+        -DCMAKE_BUILD_TYPE=Release -DSYS_KHZ=${SYS_KHZ:-200000} -UAA_CERT_HEADER $cert_cmake \
         -DAA_MAX_UNACKED=${AA_MAX_UNACKED:-1} >/dev/null
     cmake --build "$build" -j4
     python3 -I "$here/uf2.py" "$build/sdbridge.bin" "$dest/SDBRIDGE.UF2"
