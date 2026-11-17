@@ -6,7 +6,7 @@
  *
  *   GP2  CLK (input)      GP3  CMD      GP4  DAT0
  *   GP5-7 DAT1-3 (left as inputs: one data line)
- *   GP16 the board's RGB LED
+ *   the board's LED: GP16 (RP2040-Zero, a WS2812) or GP25 (Pico)
  *
  * Core 1 does nothing but the command line: it takes each command the
  * command state machine (PIO0) pushes, decides with card.c, and pushes
@@ -31,10 +31,10 @@
 #include "sd.pio.h"
 #include "card.h"
 #include "volume.h"
+#include "status.h"
 
 #define CMD_PIN 3
 #define DAT0_PIN 4
-#define LED_PIN 16
 #ifndef SYS_KHZ
 #define SYS_KHZ 200000
 #endif
@@ -148,11 +148,6 @@ static int __not_in_flash_func(send)(uint32_t gen, const uint32_t *b)
     return ok;
 }
 
-static void led(uint8_t r, uint8_t g, uint8_t b)
-{
-    pio_sm_put(pd, sm_led, ((uint32_t)g << 24) | ((uint32_t)r << 16) | ((uint32_t)b << 8));
-}
-
 static const char *const state_names[] = { "idle", "ready", "ident", "stby", "tran", "data" };
 
 /* Between requests: the LED and the log. */
@@ -160,6 +155,7 @@ static void idle(void)
 {
     static uint32_t last_ms, last_blocks, last_crc;
     uint32_t now = to_ms_since_boot(get_absolute_time());
+    status_tick();
     while (ring_out != ring_in) {
         uint32_t k = ring_out % RING;
         uint32_t what = ring[k][0], arg = ring[k][1];
@@ -178,16 +174,17 @@ static void idle(void)
             (unsigned long)slowest, (unsigned long)(slowest * 169 / (mhz * 10) + 1), ring_lost ? "  (log lost some)" : "");
         last_blocks = b;
         last_ms = now;
-        /* Blue: not started; green: started; white: read from in the
-         * last second; red: a damaged command in the last second. */
+        /* WAIT: not started; OK: started; WORKING: read from in the
+         * last second; FAIL: a damaged command in the last second
+         * (src/status.h for the colours and patterns). */
         if (card.bad_crc != last_crc)
-            led(32, 0, 0);
+            status_set(ST_FAIL);
         else if (moved)
-            led(24, 24, 24);
+            status_set(ST_WORKING);
         else if (card.state >= STBY)
-            led(0, 32, 0);
+            status_set(ST_OK);
         else
-            led(0, 0, 32);
+            status_set(ST_WAIT);
         last_crc = card.bad_crc;
     }
 }
@@ -223,7 +220,6 @@ static void data_loop(void)
 static void setup_pio(void)
 {
     uint off_cmd = pio_add_program(pc, &sd_cmd_program);
-    uint off_led;
     pio_sm_config c;
 
     gpio_init(CLK_PIN);
@@ -260,17 +256,6 @@ static void setup_pio(void)
     sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
     pio_sm_init(pd, sm_dat, off_dat + sd_dat_offset_start, &c);
 
-    /* The LED. */
-    off_led = pio_add_program(pd, &ws2812_program);
-    pio_gpio_init(pd, LED_PIN);
-    pio_sm_set_consecutive_pindirs(pd, sm_led, LED_PIN, 1, true);
-    c = ws2812_program_get_default_config(off_led);
-    sm_config_set_sideset_pins(&c, LED_PIN);
-    sm_config_set_out_shift(&c, false, true, 24);
-    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
-    sm_config_set_clkdiv(&c, (float)clock_get_hz(clk_sys) / 8000000.0f);
-    pio_sm_init(pd, sm_led, off_led, &c);
-
     /* DMA: words to the data state machine at its pace. */
     dma_ch = dma_claim_unused_channel(true);
     {
@@ -282,7 +267,6 @@ static void setup_pio(void)
         dma_channel_configure((uint)dma_ch, &d, &pd->txf[sm_dat], blocks[0], CARD_BLOCK_WORDS, false);
     }
 
-    pio_sm_set_enabled(pd, sm_led, true);
     pio_sm_set_enabled(pd, sm_dat, true);
     pio_sm_set_enabled(pc, sm_cmd, true);
 }
@@ -296,7 +280,7 @@ int main(void)
     lock = spin_lock_init((uint)spin_lock_claim_unused(true));
     card_reset(&card);
     setup_pio();
-    led(0, 0, 32);
+    status_init(pd, sm_led);
     multicore_launch_core1(command_loop);
     printf("sdbridge: an SD card of %u MiB with LINKTEST.BIN, %lu MHz\n", VOLUME_SECTORS / 2048,
         (unsigned long)(clock_get_hz(clk_sys) / 1000000));

@@ -50,6 +50,26 @@ opening: do not close the display on it.  The CD drive's eject and the
 display key keep working in `linkbench`, as in every program of the
 SDK.
 
+### On a Raspberry Pi Pico
+
+The same firmware runs on an original Raspberry Pi Pico, from
+`sdbridge/out/pico/`.  Its LED is a plain one, so the states the
+RP2040-Zero shows in colour are patterns there (`src/status.h`): a short
+flash every 2 s waiting, blinking twice a second busy, flickering at
+work, steady on for OK, two or three short flashes every 2 s for a
+warning or a failure.  The card's wiring on a Pico:
+
+| Signal | Pico pin |
+|---|---|
+| CLK | 4 (GP2), through 100 ohms |
+| CMD | 5 (GP3), through 100 ohms |
+| DAT0 | 6 (GP4), through 100 ohms |
+| GND | 3 or 8 |
+
+Pin 1 is the corner next to the micro-USB socket on the side marked
+"1"; the pins count away from the socket on that side (1-20) and back
+on the other (21-40, so 40 is the other corner by the socket).
+
 ## Building and flashing
 
 ```sh
@@ -189,6 +209,18 @@ lets the phone decide it is the host, and it will.  So use the board's
 USB-C port with a USB-C (male) to USB-A (female) OTG adapter, and the
 phone's ordinary USB-A to USB-C cable into that.  The A-to-C cable's
 pull-up tells the phone that the other end is the host.
+
+**On a Raspberry Pi Pico:** a micro-USB (male) to USB-A (female) OTG
+adapter in the Pico's socket, the phone's USB-A to USB-C cable into
+that, and 5 V into **pin 40 (VBUS)** with ground on **pin 38**.  VBUS is
+the USB socket's own 5 V and reaches the board through its diode to
+VSYS, so this one feed powers both the Pico and the phone's side of the
+cable (as the Pico's datasheet has it for a USB host).  The log is on
+pin 1 (GP0, TX), ground on pin 3.  Flash first (hold BOOTSEL while
+plugging the Pico into a computer, copy `out/pico/SDPHONE.UF2`), then
+unplug the computer before connecting the 5 V: a computer on the
+micro-USB socket and a supply on pin 40 would be two supplies on one
+wire.
 
 **Power.**  The board's own USB port is busy, so power it through its
 **5V** pin, from a supply that can also charge a phone (a phone draws up

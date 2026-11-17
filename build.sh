@@ -1,10 +1,11 @@
 #!/bin/sh
-# Build the SD bridge for a Waveshare RP2040-Zero:   sdbridge/build.sh
+# Build the SD bridge for a Waveshare RP2040-Zero and a Raspberry Pi Pico:
+#   sdbridge/build.sh
 #
 # The result is sdbridge/out/: SDBRIDGE.UF2, the card, and SDPHONE.UF2,
 # the phone on the desk, for the board's USB drive (hold BOOT while
-# plugging it in, copy the file onto RPI-RP2), and sdbridge.elf for a
-# debugger.  docs/sdbridge.md says how to wire it.
+# plugging it in, copy the file onto RPI-RP2), and their .elf files for
+# a debugger; sdbridge/out/pico/ the same for a Raspberry Pi Pico.  docs/sdbridge.md says how to wire it.
 #
 # The pico-sdk (BSD-3) and the TinyUSB it uses (MIT) are not kept in
 # the repository: they are cloned, pinned and checked against their
@@ -35,11 +36,21 @@ if [ -z "$PICO_SDK_PATH" ]; then
     [ "$(git -C "$PICO_SDK_PATH/lib/tinyusb" rev-parse HEAD)" = "$tusb_commit" ] || { echo "tinyusb: not commit $tusb_commit" >&2; exit 1; }
 fi
 
-cmake -S "$here" -B "$work/build" -DPICO_SDK_PATH="$PICO_SDK_PATH" -DPICO_BOARD=waveshare_rp2040_zero \
-    -DCMAKE_BUILD_TYPE=Release ${SYS_KHZ:+-DCMAKE_C_FLAGS=-DSYS_KHZ=$SYS_KHZ} >/dev/null
-cmake --build "$work/build" -j4
-python3 -I "$here/uf2.py" "$work/build/sdbridge.bin" "$out/SDBRIDGE.UF2"
-python3 -I "$here/uf2.py" "$work/build/sdphone.bin" "$out/SDPHONE.UF2"
-cp "$work/build/sdbridge.elf" "$out/sdbridge.elf"
+# Twice: for the RP2040-Zero (sdbridge/out/) and for a Raspberry Pi Pico
+# (sdbridge/out/pico/), whose LED is a plain one on GP25.
+for board in waveshare_rp2040_zero pico; do
+    case $board in
+        pico) build=$work/build-pico dest=$out/pico ;;
+        *) build=$work/build dest=$out ;;
+    esac
+    mkdir -p "$dest"
+    cmake -S "$here" -B "$build" -DPICO_SDK_PATH="$PICO_SDK_PATH" -DPICO_BOARD=$board \
+        -DCMAKE_BUILD_TYPE=Release ${SYS_KHZ:+-DCMAKE_C_FLAGS=-DSYS_KHZ=$SYS_KHZ} >/dev/null
+    cmake --build "$build" -j4
+    python3 -I "$here/uf2.py" "$build/sdbridge.bin" "$dest/SDBRIDGE.UF2"
+    python3 -I "$here/uf2.py" "$build/sdphone.bin" "$dest/SDPHONE.UF2"
+    cp "$build/sdbridge.elf" "$dest/sdbridge.elf"
+    cp "$build/sdphone.elf" "$dest/sdphone.elf"
+done
 cp "$work/build/sd.pio.h" "$out/sd.pio.h"
-ls -l "$out/SDBRIDGE.UF2" "$out/SDPHONE.UF2"
+ls -l "$out"/*.UF2 "$out"/pico/*.UF2

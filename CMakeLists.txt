@@ -5,7 +5,7 @@ include(${PICO_SDK_PATH}/pico_sdk_init.cmake)
 project(sdbridge C CXX ASM)
 pico_sdk_init()
 
-add_executable(sdbridge src/main.c src/card.c src/volume.c src/crc.c)
+add_executable(sdbridge src/main.c src/card.c src/volume.c src/crc.c src/status.c)
 pico_generate_pio_header(sdbridge ${CMAKE_CURRENT_LIST_DIR}/src/sd.pio)
 target_compile_options(sdbridge PRIVATE -Wall -Wextra -O2)
 # The log may not hold up the data side: a terminal that is open and
@@ -22,7 +22,7 @@ add_custom_command(TARGET sdbridge POST_BUILD
 
 # The phone on the desk (src/sdphone.c): the USB port as a host, the log
 # on UART0 (GP0, 115200 baud).
-add_executable(sdphone src/sdphone.c src/aap.c)
+add_executable(sdphone src/sdphone.c src/aap.c src/status.c)
 pico_generate_pio_header(sdphone ${CMAKE_CURRENT_LIST_DIR}/src/sd.pio OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/phone)
 target_include_directories(sdphone PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src)
 target_compile_options(sdphone PRIVATE -Wall -Wextra -O2)

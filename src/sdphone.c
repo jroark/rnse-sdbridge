@@ -6,28 +6,27 @@
  * the power and the phone's accessory mode work, and that the phone's
  * Android Auto answers (docs/sdbridge.md, "The phone on the desk").
  *
- * The LED says how far it got:
- *   blue     waiting for a phone
- *   yellow   a phone: asking it to switch to accessory mode
- *   cyan     in accessory mode, the version request sent
- *   green    Android Auto answered, the versions match (stays)
- *   magenta  it answered, the versions do not match (stays)
- *   red      the device has no accessory mode, or something failed
+ * The LED says how far it got (src/status.h: a colour on an RP2040-Zero,
+ * a pattern on a Raspberry Pi Pico):
+ *   WAIT     waiting for a phone
+ *   BUSY     a phone: asking it to switch to accessory mode
+ *   WORKING  in accessory mode, the version request sent
+ *   OK       Android Auto answered, the versions match (stays)
+ *   WARN     it answered, the versions do not match (stays)
+ *   FAIL     the device has no accessory mode, or something failed
  *            (stays until the phone is unplugged)
  * and the log on GP0 (UART0 TX, 115200 baud) says it in words.
  *
- * The board's USB-C port is the host here, so the board is powered from
- * its 5V pin, and the phone takes its USB power from that too. */
+ * The board's USB port is the host here, so the board is powered with
+ * 5 V on the pin that is the USB port's VBUS (a Pico's VBUS, pin 40; an
+ * RP2040-Zero's 5V), and the phone takes its USB power from that too. */
 #include <stdio.h>
 #include <string.h>
 #include "pico/stdlib.h"
 #include "hardware/pio.h"
-#include "hardware/clocks.h"
 #include "tusb.h"
-#include "sd.pio.h"
 #include "aap.h"
-
-#define LED_PIN 16
+#include "status.h"
 
 /* Google's vendor id and the two product ids of accessory mode (the
  * second with ADB as well). */
@@ -44,28 +43,6 @@ static const char *const aoa_strings[] = {
     "https://www.android.com/auto/",
     "HU-AAAAAA001",           /* serial */
 };
-
-static const PIO pl = pio1;
-static const uint sm_led = 0;
-
-static void led(uint8_t r, uint8_t g, uint8_t b)
-{
-    pio_sm_put_blocking(pl, sm_led, ((uint32_t)g << 24) | ((uint32_t)r << 16) | ((uint32_t)b << 8));
-}
-
-static void setup_led(void)
-{
-    uint off = pio_add_program(pl, &ws2812_program);
-    pio_sm_config c = ws2812_program_get_default_config(off);
-    pio_gpio_init(pl, LED_PIN);
-    pio_sm_set_consecutive_pindirs(pl, sm_led, LED_PIN, 1, true);
-    sm_config_set_sideset_pins(&c, LED_PIN);
-    sm_config_set_out_shift(&c, false, true, 24);
-    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
-    sm_config_set_clkdiv(&c, (float)clock_get_hz(clk_sys) / 8000000.0f);
-    pio_sm_init(pl, sm_led, off, &c);
-    pio_sm_set_enabled(pl, sm_led, true);
-}
 
 /* ---- the device ---------------------------------------------------- */
 
@@ -227,16 +204,16 @@ int main(void)
     absolute_time_t since = get_absolute_time();
 
     stdio_init_all();
-    setup_led();
-    led(0, 0, 32);
+    status_init(pio1, 0);
     printf("\nsdphone: waiting for a phone on the USB port\n");
     tuh_init(0);
 
     for (;;) {
         tuh_task();
+        status_tick();
         if (!mounted && state != WAITING && state != SWITCHING) {
             state = WAITING;
-            led(0, 0, 32);
+            status_set(ST_WAIT);
         }
         if (fresh) {
             uint16_t vid = 0, pid = 0;
@@ -248,18 +225,18 @@ int main(void)
                 aap_reader_init(&reader);
                 if (open_accessory(daddr) || send_version_request(daddr) || read_more(daddr)) {
                     state = FAILED;
-                    led(32, 0, 0);
+                    status_set(ST_FAIL);
                 } else {
                     printf("version request sent\n");
                     state = ACCESSORY;
                     since = get_absolute_time();
-                    led(0, 24, 24);
+                    status_set(ST_WORKING);
                 }
             } else {
-                led(24, 24, 0);
+                status_set(ST_BUSY);
                 state = switch_to_accessory(daddr) ? FAILED : SWITCHING;
                 if (state == FAILED)
-                    led(32, 0, 0);
+                    status_set(ST_FAIL);
             }
         }
         if (state == ACCESSORY && in_done) {
@@ -268,13 +245,13 @@ int main(void)
             if (in_done < 0) {
                 printf("reading from the phone failed\n");
                 state = FAILED;
-                led(32, 0, 0);
+                status_set(ST_FAIL);
                 continue;
             }
             if (aap_feed(&reader, in_buf, in_len)) {
                 printf("the phone's bytes make no frames\n");
                 state = FAILED;
-                led(32, 0, 0);
+                status_set(ST_FAIL);
                 continue;
             }
             while (aap_next(&reader, &f)) {
@@ -283,21 +260,21 @@ int main(void)
                     printf("Android Auto answered: version %u.%u, %s\n", major, minor, status == 0 ? "they match" : "they do not match");
                     state = ANSWERED;
                     if (status == 0)
-                        led(0, 32, 0);
+                        status_set(ST_OK);
                     else
-                        led(32, 0, 32);
+                        status_set(ST_WARN);
                 }
             }
             if (state == ACCESSORY && read_more(daddr)) {
                 state = FAILED;
-                led(32, 0, 0);
+                status_set(ST_FAIL);
             }
         }
         if (state == ACCESSORY && out_done < 0) {
             printf("sending to the phone failed\n");
             out_done = 0;
             state = FAILED;
-            led(32, 0, 0);
+            status_set(ST_FAIL);
         }
         if (state == ACCESSORY && absolute_time_diff_us(since, get_absolute_time()) > 5000000) {
             printf("no answer in 5 s: is Android Auto installed and allowed on the phone?\n");
