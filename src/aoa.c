@@ -85,7 +85,9 @@ int aoa_switch(uint8_t daddr)
 }
 
 static uint8_t ep_in, ep_out;
-uint8_t aoa_in[AOA_IN_SIZE] __attribute__((aligned(4)));
+static uint8_t in_buf[2][AOA_IN_SIZE] __attribute__((aligned(4)));
+static int in_next;
+uint8_t *volatile aoa_in = in_buf[0];
 volatile int aoa_in_done;
 volatile uint32_t aoa_in_len;
 static volatile int out_done;
@@ -129,6 +131,7 @@ int aoa_open(uint8_t daddr)
 
 static void in_cb(tuh_xfer_t *x)
 {
+    aoa_in = in_buf[x->user_data];
     aoa_in_len = x->result == XFER_RESULT_SUCCESS ? x->actual_len : 0;
     aoa_in_done = x->result == XFER_RESULT_SUCCESS ? 1 : -1;
 }
@@ -143,11 +146,13 @@ int aoa_read(uint8_t daddr)
     tuh_xfer_t x = {
         .daddr = daddr,
         .ep_addr = ep_in,
-        .buflen = sizeof aoa_in,
-        .buffer = aoa_in,
+        .buflen = AOA_IN_SIZE,
+        .buffer = in_buf[in_next],
         .complete_cb = in_cb,
+        .user_data = (uintptr_t)in_next,
     };
     aoa_in_done = 0;
+    in_next ^= 1;
     return tuh_edpt_xfer(&x) ? 0 : -1;
 }
 

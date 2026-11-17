@@ -20,14 +20,17 @@ int aoa_switch(uint8_t daddr);
 int aoa_open(uint8_t daddr);
 
 /* Bytes from the phone: aoa_read starts a transfer; when it completes,
- * aoa_in_done is 1 (aoa_in_len bytes in aoa_in) or -1 (failed).  A
+ * aoa_in_done is 1 (aoa_in_len bytes at aoa_in) or -1 (failed).  A
  * transfer ends with the phone's short packet or a full buffer, so a
  * larger AOA_IN_SIZE (sdstream: 16 KiB) takes many 64-byte packets at
- * once. */
+ * once.  There are two buffers and each transfer takes the one the last
+ * did not: a caller may start the next transfer as soon as one is done
+ * and take the bytes apart (from aoa_in as it was then) while the next
+ * comes in. */
 #ifndef AOA_IN_SIZE
 #define AOA_IN_SIZE 512
 #endif
-extern uint8_t aoa_in[AOA_IN_SIZE];
+extern uint8_t *volatile aoa_in;
 extern volatile int aoa_in_done;
 extern volatile uint32_t aoa_in_len;
 int aoa_read(uint8_t daddr);

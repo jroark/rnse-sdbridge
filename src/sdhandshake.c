@@ -410,24 +410,31 @@ static void core1(void)
             }
         }
         if (state >= VERSION && state != FAILED && aoa_in_done) {
+            const uint8_t *in = aoa_in;
             uint32_t at, k, len = aoa_in_len;
             if (aoa_in_done < 0) {
                 fail("reading from the phone failed", 0);
                 continue;
             }
             usb_bytes += len;
+            /* The next transfer under way (into the other buffer) while
+             * this one is decrypted and answered: the link does not wait
+             * on the Pico.  Answers go out meanwhile (bulk OUT is not on
+             * EPX: sdbridge/patches/). */
+            if (aoa_read(daddr)) {
+                fail("reading from the phone failed", 0);
+                continue;
+            }
             /* In pieces the reader has room for, the frames taken out
              * between them. */
             for (at = 0; at < len && state != FAILED; at += k) {
                 k = len - at < AAP_FEED_MAX ? len - at : AAP_FEED_MAX;
-                if (aap_feed(&reader, aoa_in + at, k)) {
+                if (aap_feed(&reader, in + at, k)) {
                     fail("the phone's bytes make no frames", 0);
                     break;
                 }
                 frames();
             }
-            if (state != FAILED && aoa_read(daddr))
-                fail("reading from the phone failed", 0);
         }
         stats(0);
     }

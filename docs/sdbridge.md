@@ -483,10 +483,16 @@ through adb over Wi-Fi):
   KB/s** as a packet a transaction.  So the controller is not the limit:
   the firmware reads, then decrypts, then reads again, and with 65 % of
   the time decrypting the link (about 900 KB/s when it runs) stands idle
-  the rest.  Next: the next read under way while the last is decrypted
-  (bulk OUT, only acknowledgements, back on a polled endpoint so that
-  EPX can wait on the phone meanwhile), then decryption on the second
-  core.
+  the rest.
+* So the next read now goes under way as soon as one is in (`aoa.c` has
+  two buffers), and is decrypted while the next comes; bulk OUT (the
+  acknowledgements, a few dozen bytes) is back on a polled endpoint, so
+  that EPX can wait on the phone meanwhile.  With it the USB peaked at
+  **404 KB/s** and held about 370 KB/s through long pans: video 28 to
+  30 frames a second at 160 to 290 KB/s, and the sound near its full
+  192 KB/s, where before the same pans cut it to 30 to 100.  Decrypting
+  then took 84 to 91 % of the Pico's time: the decryption (about 440
+  KB/s on core 1, which also runs the USB) is the limit now.
 
 Tested on the host (`tests/tls_host.c`): a stand-in phone goes through
 the whole session in real frames and encryption: discovery (the
