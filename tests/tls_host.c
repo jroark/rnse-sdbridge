@@ -354,7 +354,7 @@ static void session(void)
                             }
                         }
                     }
-                    video_ok = type == 3 && res == 1 && fps == 1;
+                    video_ok = type == 3 && res == 1 && fps == AA_HU_FPS;
                 }
                 if (g.number == 4 && id == AA_CH_INPUT)
                     input_ok = 1;

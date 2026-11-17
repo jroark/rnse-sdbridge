@@ -40,6 +40,14 @@
 #include "status.h"
 #include "mbedtls/error.h"
 #include "hu_cert.h"
+#if AA_STREAM
+/* The TinyUSB patch's count of packets lost after a short one
+ * (sdbridge/patches/, double-buffered only). */
+extern volatile uint32_t rp2040_host_epx_short_lost;
+#ifndef PICO_USB_HOST_BULK_DOUBLE_BUFFER
+#define PICO_USB_HOST_BULK_DOUBLE_BUFFER 0
+#endif
+#endif
 
 #ifndef AA_STREAM
 #define AA_STREAM 0
@@ -303,6 +311,15 @@ static void frames(void)
     }
 }
 
+static uint32_t short_lost(void)
+{
+#if AA_STREAM
+    return rp2040_host_epx_short_lost;
+#else
+    return 0;
+#endif
+}
+
 /* SDSTREAM: once a second, what came in that second. */
 static void stats(int final)
 {
@@ -326,13 +343,13 @@ static void stats(int final)
         return;
     if (state == STREAMING || sound_seen || usb_bytes != last.usb)
         printf("%4lus: video %lu fps, %lu KB/s, %lu key; sound %lu KB/s; USB %lu KB/s, %lu frames; "
-               "decrypting %lu%% of the time; largest %lu bytes, %lu acks, %lu pings\n",
+               "decrypting %lu%% of the time; largest %lu bytes, %lu acks, %lu pings, %lu lost\n",
             (unsigned long)((now - t_auth) / 1000), (unsigned long)((v->messages - last.messages) * 1000 / dt),
             (unsigned long)((v->bytes - last.video) * 1000 / 1024 / dt), (unsigned long)(v->idr - last.idr),
             (unsigned long)((hu.audio_bytes - last.audio) * 1000 / 1024 / dt),
             (unsigned long)((usb_bytes - last.usb) * 1000 / 1024 / dt), (unsigned long)(frames_in - last.frames),
             (unsigned long)((decrypt_us - last.decrypt) / 10 / dt), (unsigned long)v->largest,
-            (unsigned long)v->acks, (unsigned long)hu.pings);
+            (unsigned long)v->acks, (unsigned long)hu.pings, (unsigned long)short_lost());
     last.usb = usb_bytes;
     last.video = v->bytes;
     last.audio = hu.audio_bytes;
@@ -422,12 +439,15 @@ int main(void)
 {
     stdio_init_all();
     status_init(pio1, 0);
-    if (AA_STREAM)
-        printf("\nsdstream: waiting for a phone on the USB port (an 800x480 head unit with sound channels, "
-               "%d frame%s ahead of the acknowledgements)\n", AA_MAX_UNACKED, AA_MAX_UNACKED == 1 ? "" : "s");
-    else
-        printf("\nsdhandshake: waiting for a phone on the USB port (with a self-signed test certificate, "
-               "expect the phone to refuse it)\n");
+#if AA_STREAM
+    printf("\nsdstream: waiting for a phone on the USB port (an 800x480 head unit with sound channels, "
+           "%d frame%s ahead of the acknowledgements, video configuration %d fps, USB bulk %s)\n", AA_MAX_UNACKED,
+           AA_MAX_UNACKED == 1 ? "" : "s", AA_HU_FPS == 2 ? 30 : 60,
+           PICO_USB_HOST_BULK_DOUBLE_BUFFER ? "double-buffered" : "a packet at a time");
+#else
+    printf("\nsdhandshake: waiting for a phone on the USB port (with a self-signed test certificate, "
+           "expect the phone to refuse it)\n");
+#endif
     printf("certificate: %s\n", HU_CERT_WIRE ? "dates with a time zone; mbedTLS parses a copy in UTC, the phone gets it as it is"
                                              : "as given");
     multicore_launch_core1_with_stack(core1, core1_stack, sizeof core1_stack);

@@ -65,4 +65,18 @@ if (AA_CERT_HEADER)
     pico_enable_stdio_uart(sdstream 1)
     add_custom_command(TARGET sdstream POST_BUILD
         COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:sdstream> sdstream.bin)
+
+    # The same with the USB's bulk transfers double-buffered (the TinyUSB
+    # patch's PICO_USB_HOST_BULK_DOUBLE_BUFFER): SDSTREAMDB.UF2.
+    add_executable(sdstreamdb src/sdhandshake.c src/aa_tls.c src/aa_hu.c src/aap.c src/aoa.c src/status.c)
+    pico_generate_pio_header(sdstreamdb ${CMAKE_CURRENT_LIST_DIR}/src/sd.pio OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/streamdb)
+    target_include_directories(sdstreamdb PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src ${AA_CERT_DIR})
+    target_compile_options(sdstreamdb PRIVATE -Wall -Wextra -O2)
+    target_compile_definitions(sdstreamdb PRIVATE AA_STREAM=1 AOA_IN_SIZE=16384 AAP_MESSAGE_MAX=16384
+        AA_MAX_UNACKED=${AA_MAX_UNACKED} PICO_USB_HOST_BULK_DOUBLE_BUFFER=1)
+    target_link_libraries(sdstreamdb pico_stdlib pico_multicore hardware_pio tinyusb_host pico_mbedtls)
+    pico_enable_stdio_usb(sdstreamdb 0)
+    pico_enable_stdio_uart(sdstreamdb 1)
+    add_custom_command(TARGET sdstreamdb POST_BUILD
+        COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:sdstreamdb> sdstreamdb.bin)
 endif()

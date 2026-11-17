@@ -82,9 +82,10 @@ for board in waveshare_rp2040_zero pico; do
     if [ -n "$cert_cmake" ]; then
         python3 -I "$here/uf2.py" "$build/sdhandshake.bin" "$dest/SDHANDSHAKE.UF2"
         python3 -I "$here/uf2.py" "$build/sdstream.bin" "$dest/SDSTREAM.UF2"
+        python3 -I "$here/uf2.py" "$build/sdstreamdb.bin" "$dest/SDSTREAMDB.UF2"
         arm-none-eabi-size "$build/sdstream.elf" "$build/sdhandshake.elf" | sed "s|$build/||"
     else
-        rm -f "$dest/SDHANDSHAKE.UF2" "$dest/SDSTREAM.UF2"
+        rm -f "$dest/SDHANDSHAKE.UF2" "$dest/SDSTREAM.UF2" "$dest/SDSTREAMDB.UF2"
     fi
     cp "$build/sdbridge.elf" "$dest/sdbridge.elf"
     cp "$build/sdphone.elf" "$dest/sdphone.elf"

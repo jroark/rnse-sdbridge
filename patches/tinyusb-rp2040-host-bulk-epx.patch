@@ -199,20 +199,75 @@ index 2c0a3fd..23ccf9d 100644
    struct hw_endpoint * ep = _hw_endpoint_allocate(0);
    TU_ASSERT(ep);
 diff --git a/src/portable/raspberrypi/rp2040/rp2040_usb.c b/src/portable/raspberrypi/rp2040/rp2040_usb.c
-index 43f48da..902d09e 100644
+index 43f48da..8f0c226 100644
 --- a/src/portable/raspberrypi/rp2040/rp2040_usb.c
 +++ b/src/portable/raspberrypi/rp2040/rp2040_usb.c
-@@ -145,6 +145,13 @@ static uint32_t __tusb_irq_path_func(prepare_ep_buffer)(struct hw_endpoint* ep,
+@@ -86,6 +86,11 @@ void rp2040_usb_init(void) {
+   TU_LOG2_INT(sizeof(hw_endpoint_t));
+ }
+ 
++#if CFG_TUH_ENABLED
++// rnse sdbridge patch: see _hw_endpoint_xfer_sync.
++volatile uint32_t rp2040_host_epx_short_lost;
++#endif
++
+ void __tusb_irq_path_func(hw_endpoint_reset_transfer)(struct hw_endpoint* ep) {
+   ep->active = false;
+   ep->remaining_len = 0;
+@@ -145,6 +150,14 @@ static uint32_t __tusb_irq_path_func(prepare_ep_buffer)(struct hw_endpoint* ep,
    if (ep->remaining_len == 0) {
      buf_ctrl |= USB_BUF_CTRL_LAST;
    }
 +#if CFG_TUH_ENABLED
-+  // rnse sdbridge patch: host bulk runs on EPX a packet at a time
-+  // (hcd_rp2040.c starts each one), so every buffer is the last.
-+  if (is_host_mode() && ep->transfer_type == TUSB_XFER_BULK) {
++  // rnse sdbridge patch: host bulk runs on EPX a packet (or with
++  // PICO_USB_HOST_BULK_DOUBLE_BUFFER two) at a time, hcd_rp2040.c starting
++  // each transaction, so the packet (the second of two) is the last.
++  if (is_host_mode() && ep->transfer_type == TUSB_XFER_BULK && (!PICO_USB_HOST_BULK_DOUBLE_BUFFER || buf_id == 1)) {
 +    buf_ctrl |= USB_BUF_CTRL_LAST;
 +  }
 +#endif
  
    if (buf_id) buf_ctrl = buf_ctrl << 16;
  
+@@ -165,7 +178,8 @@ void __tusb_irq_path_func(hw_endpoint_start_next_buffer)(struct hw_endpoint* ep)
+   // NOTE2: Currently Host bulk is implemented using "interrupt" endpoint
+   bool const is_host = is_host_mode();
+   bool const force_single = (!is_host && !tu_edpt_dir(ep->ep_addr)) ||
+-                            (is_host && tu_edpt_number(ep->ep_addr) != 0);
++                            (is_host && tu_edpt_number(ep->ep_addr) != 0 &&
++                             !(PICO_USB_HOST_BULK_DOUBLE_BUFFER && ep->transfer_type == TUSB_XFER_BULK));
+ 
+   if (ep->remaining_len && !force_single) {
+     // Use buffer 1 (double buffered) if there is still data
+@@ -268,6 +282,13 @@ static void __tusb_irq_path_func(_hw_endpoint_xfer_sync)(struct hw_endpoint* ep)
+       // sync buffer 1 if not short packet
+       sync_ep_buffer(ep, 1);
+     } else {
++#if CFG_TUH_ENABLED
++      // rnse sdbridge patch: count a second buffer that took data after a
++      // short packet in the first (that data would be lost).
++      if (is_host_mode() && (_hw_endpoint_buffer_control_get_value32(ep) >> 16) & USB_BUF_CTRL_FULL) {
++        rp2040_host_epx_short_lost++;
++      }
++#endif
+       // short packet on buffer 0
+       // TODO couldn't figure out how to handle this case which happen with net_lwip_webserver example
+       // At this time (currently trigger per 2 buffer), the buffer1 is probably filled with data from
+diff --git a/src/portable/raspberrypi/rp2040/rp2040_usb.h b/src/portable/raspberrypi/rp2040/rp2040_usb.h
+index d4d29a8..1b3c008 100644
+--- a/src/portable/raspberrypi/rp2040/rp2040_usb.h
++++ b/src/portable/raspberrypi/rp2040/rp2040_usb.h
+@@ -99,6 +99,13 @@ extern volatile uint32_t e15_last_sof;
+ 
+ void rp2040_usb_init(void);
+ 
++// rnse sdbridge patch: host bulk transfers on EPX double-buffered (0: a
++// packet a transaction), and the count of packets a short one lost.
++#ifndef PICO_USB_HOST_BULK_DOUBLE_BUFFER
++#define PICO_USB_HOST_BULK_DOUBLE_BUFFER 0
++#endif
++extern volatile uint32_t rp2040_host_epx_short_lost;
++
+ void hw_endpoint_xfer_start(struct hw_endpoint *ep, uint8_t *buffer, uint16_t total_len);
+ bool hw_endpoint_xfer_continue(struct hw_endpoint *ep);
+ void hw_endpoint_reset_transfer(struct hw_endpoint *ep);

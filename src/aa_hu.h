@@ -53,6 +53,12 @@
 
 #define AA_HU_WIDTH 800
 #define AA_HU_HEIGHT 480
+/* The video configuration's frame rate: current phones read 2 as 30
+ * frames a second and 1 as 60 (aasdk has them the other way round; a
+ * Pixel of 2026 sent up to 58 a second for 1). */
+#ifndef AA_HU_FPS
+#define AA_HU_FPS 2
+#endif
 
 /* A message for the phone: to be encrypted and sent as one frame on
  * `channel` with `flags` (AAP_CONTROL or 0). */

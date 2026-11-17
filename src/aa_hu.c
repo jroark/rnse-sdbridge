@@ -74,10 +74,10 @@ int aa_hu_discovery(uint8_t *out, uint32_t cap)
         return -1;
 
     /* Video: stream type 3, one configuration: 480p (800x480), 30 frames
-     * a second, no margins, 140 dots an inch. */
+     * a second (AA_HU_FPS), no margins, 140 dots an inch. */
     aap_pb_init(&e, inner, sizeof inner);
     aap_pb_varint(&e, 1, 1);
-    aap_pb_varint(&e, 2, 1);
+    aap_pb_varint(&e, 2, AA_HU_FPS);
     aap_pb_varint(&e, 3, 0);
     aap_pb_varint(&e, 4, 0);
     aap_pb_varint(&e, 5, 140);
