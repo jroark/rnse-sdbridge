@@ -125,8 +125,10 @@ screen /dev/ttyUSB0 115200                  # Linux
 
 ## What to do next
 
-1. Ask the phone for 30 frames a second (value 2 in the video
-   configuration), and see how far USB goes with EPX double-buffered.
+1. Overlap the USB read with decryption (the next read under way while
+   the last is decrypted); then decryption on the second core.  At 30
+   frames a second, double-buffered or not, the link stops at about
+   310 KB/s because it waits while the Pico decrypts.
 2. Run `linkbench` on the unit with an ordinary card and `LINKTEST.BIN`
    (`python3 tools/linktest.py > LINKTEST.BIN`): the slot's real rates.
 3. Run `SDBRIDGE.UF2` in the slot on the ribbon (wiring in

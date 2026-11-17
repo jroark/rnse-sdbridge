@@ -470,6 +470,23 @@ through adb over Wi-Fi):
 * Decrypting took **64 to 66 % of the Pico's time** at 310 KB/s (AES-128-
   GCM in mbedTLS on a Cortex-M0+ at 200 MHz): about 480 KB/s would take
   all of it.
+* Asked for 30 frames a second (value 2), the phone sent 28 to 31 for
+  100 s: 15 to 20 KB/s of video on a still map, up to 290 KB/s while
+  panning, key frames up to 101 KB.  The sound kept its full rate
+  except while panning.
+* `SDSTREAMDB.UF2` double-buffers the bulk transfers (two packets a
+  transaction).  It first stopped with TinyUSB's "Data Seq Error": after
+  a short packet in the first buffer the controller does not use the
+  second (no data is lost, the patch counts it and the count stayed 0),
+  so the data toggle prepared for the second has to be given back; the
+  patch does.  Double-buffered, the USB carried the same **310 to 320
+  KB/s** as a packet a transaction.  So the controller is not the limit:
+  the firmware reads, then decrypts, then reads again, and with 65 % of
+  the time decrypting the link (about 900 KB/s when it runs) stands idle
+  the rest.  Next: the next read under way while the last is decrypted
+  (bulk OUT, only acknowledgements, back on a polled endpoint so that
+  EPX can wait on the phone meanwhile), then decryption on the second
+  core.
 
 Tested on the host (`tests/tls_host.c`): a stand-in phone goes through
 the whole session in real frames and encryption: discovery (the
