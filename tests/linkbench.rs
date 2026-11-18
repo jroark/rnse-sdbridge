@@ -16,10 +16,9 @@ use rnse::board::Model;
 use rnse::machine::Machine;
 use rnse::sh4::cpu::Stop;
 
-/// The program built with -DBURST_PACE=8 (see `block_in` in its
-/// source): the emulator's port reads take a cycle, a unit's bus several.
-/// sdk/out/linkbench-192.bin is rebuilt without afterwards: that one is
-/// for a unit.
+/// The program as it is built for a unit (its BURST_PACE, see
+/// `block_in` in its source, is slow enough for the emulator's one-cycle
+/// port reads too).
 fn build() -> Option<Vec<u8>> {
     static BUILT: std::sync::Mutex<Option<Option<Vec<u8>>>> = std::sync::Mutex::new(None);
     let mut built = BUILT.lock().unwrap_or_else(|e| e.into_inner());
@@ -29,12 +28,8 @@ fn build() -> Option<Vec<u8>> {
     let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
     let make = |extra: &str| std::process::Command::new("sh").arg(sdk.join("build.sh")).args(["192", "linkbench"])
         .env("EXTRA_CFLAGS", extra).output();
-    let program = match make("-DBURST_PACE=8") {
-        Ok(out) if out.status.success() => {
-            let program = std::fs::read(sdk.join("out/linkbench-192.bin")).unwrap();
-            assert!(make("").unwrap().status.success());
-            Some(program)
-        }
+    let program = match make("") {
+        Ok(out) if out.status.success() => Some(std::fs::read(sdk.join("out/linkbench-192.bin")).unwrap()),
         Ok(out) => {
             let text = String::from_utf8_lossy(&out.stderr);
             // A compiler that is there and fails is a failure; none is a skip.
@@ -60,7 +55,10 @@ fn linktest(bytes: usize) -> Vec<u8> {
     (0..bytes as u32 / 4).flat_map(|j| pattern(j).to_be_bytes()).collect()
 }
 
-fn start(program: &[u8], card: Option<Vec<u8>>) -> Machine {
+/// `old`: a card of the first SD specification, which does not answer
+/// CMD8 and is busy for a few rounds of ACMD41, as the 32 MB card tried
+/// on a unit was.
+fn start(program: &[u8], card: Option<Vec<u8>>, old: bool) -> Machine {
     let mut m = Machine::for_model(Model::Rnse192);
     m.echo_console = std::env::var_os("RNSE_LINK_ECHO").is_some();
     m.scramble_ram();
@@ -73,6 +71,7 @@ fn start(program: &[u8], card: Option<Vec<u8>>) -> Machine {
     m.busy_start();
     m.watchdog_always = true;
     m.cache_model();
+    m.board.media.old_cards = old;
     if let Some(card) = card {
         assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
     }
@@ -101,12 +100,16 @@ fn result<'a>(text: &'a str, name: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no line for {}: {}", name, text))
 }
 
-const CARD_TESTS: [&str; 7] = ["CMD17 /4", "CMD18 /4", "CMD18 /3", "CMD18 /4 BURST", "CMD18 /3 BURST", "CMD18 /2", "CMD18 /2 BURST"];
+const CARD_TESTS: [&str; 9] = ["CMD17 /4", "CMD18 /4", "CMD18 /3", "CMD18 /4 BURST", "CMD18 /3 BURST", "CMD18 /2", "CMD18 /2 BURST", "CMD18 /5 BURST", "CMD18 /5 BUR40"];
 const PORT_TESTS: [&str; 3] = ["PORT OUT", "PORT IN", "PORT OUT BURST"];
 
-/// Every word as it should be, nothing late or missing.
+/// Every word as it should be, nothing late or missing.  A CMD18 run
+/// ends with the stray word of the block the card had begun when CMD12
+/// stopped it (src/dev/upd77115.rs, as on a unit), flagged in SDCTL bit
+/// 5: status 8020 there and nothing else.
 fn clean(line: &str) {
-    assert!(line.contains(" B0 T0 L0") && !line.contains("FAIL") && !line.contains(" S"), "{}", line);
+    let status = line.contains(" S") && !(line.starts_with("CMD18") && line.ends_with(" S8020"));
+    assert!(line.contains(" B0 T0 L0") && !line.contains("FAIL") && !status, "{}", line);
 }
 
 #[test]
@@ -115,12 +118,13 @@ fn link_benchmark_reads_a_card_through_its_own_program() {
     // A fresh card, so that the file is one run of clusters.
     let file = linktest(2 << 20);
     let card = rnse::fat::card("LINK", &[rnse::fat::Entry::file("LINKTEST.BIN", file)], None).unwrap();
-    let mut m = start(&program, Some(card));
+    let mut m = start(&program, Some(card), true);
     assert!(until(&mut m, "rnse sdk: linkbench", 5), "{}", console(&m));
     assert!(until(&mut m, "DONE.", 300), "{}", console(&m));
     let text = console(&m);
     println!("{}", text);
-    assert!(text.contains("CARD STARTED"), "{}", text);
+    // Started at the first try: no line on why it was tried again.
+    assert!(text.contains("CARD STARTED") && !text.contains("OWN PROGRAM"), "{}", text);
     assert!(text.contains("LINKTEST.BIN: 4096 SECTORS"), "{}", text);
     assert!(result(&text, "STOCK DRIVER").contains("NOT RUN"));
     for name in CARD_TESTS.iter().chain(PORT_TESTS.iter()) {
@@ -136,7 +140,7 @@ fn link_benchmark_sees_a_bad_sector() {
     let mut file = linktest(2 << 20);
     file[512 * 100 + 7] ^= 1;
     let card = rnse::fat::card("LINK", &[rnse::fat::Entry::file("LINKTEST.BIN", file)], None).unwrap();
-    let mut m = start(&program, Some(card));
+    let mut m = start(&program, Some(card), false);
     assert!(until(&mut m, "DONE.", 300), "{}", console(&m));
     let text = console(&m);
     for name in CARD_TESTS {
@@ -152,7 +156,7 @@ fn link_benchmark_sees_a_bad_sector() {
 #[test]
 fn link_benchmark_without_a_card() {
     let Some(program) = build() else { return };
-    let mut m = start(&program, None);
+    let mut m = start(&program, None, false);
     assert!(until(&mut m, "DONE.", 300), "{}", console(&m));
     let text = console(&m);
     for name in PORT_TESTS {
@@ -184,7 +188,7 @@ fn link_benchmark_reads_the_bridge_s_volume() {
     let card = std::fs::read(&image).unwrap();
     std::fs::remove_dir_all(&dir).ok();
     assert_eq!(card.len(), 64 << 20);
-    let mut m = start(&program, Some(card));
+    let mut m = start(&program, Some(card), false);
     assert!(until(&mut m, "DONE.", 300), "{}", console(&m));
     let text = console(&m);
     assert!(text.contains("CARD STARTED"), "{}", text);
