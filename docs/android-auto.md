@@ -30,7 +30,11 @@ that slot's card processor.  It carries the phone's bytes and nothing
 else: decoding, picture and sound stay on the unit.  On a bench it
 would sit at the end of an SD extension cable; in a car it would be
 soldered to one slot's contacts on the card board, which leaves the
-other slot free.  None of this is built.
+other slot free.  The first step of it is built, untried on a unit: an
+RP2040 that answers as a read-only card for `linkbench`
+([sdbridge.md](sdbridge.md)).  Its phone side has run: on a Raspberry
+Pi Pico as USB host, a phone went into accessory mode and its Android
+Auto answered the version request (2026-11-17).
 
 ### How fast a slot is: `linkbench`
 
