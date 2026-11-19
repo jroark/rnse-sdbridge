@@ -23,7 +23,7 @@ Once pull request #27 is merged, `main` has all of it instead.
 |---|---|---|
 | the emulator and its tests | `curl https://sh.rustup.rs -sSf \| sh` (Rust) | the same |
 | the RP2040 firmware | `brew install cmake` and `brew install --cask gcc-arm-embedded` (the Arm toolchain with newlib) | `sudo apt install cmake gcc-arm-none-eabi libnewlib-arm-none-eabi build-essential` |
-| the 192's programs (SH-4) | Docker Desktop, then `PATH=$PWD/tools/sh4-docker:$PATH` | `sudo apt install gcc-sh4-linux-gnu binutils-sh4-linux-gnu` |
+| the 192's programs (SH-4) | Docker Desktop, then `PATH=$PWD/sdk/tools/sh4-docker:$PATH` | `sudo apt install gcc-sh4-linux-gnu binutils-sh4-linux-gnu` |
 | test certificates, host tests | `openssl` and `python3` (both already there) | `sudo apt install openssl python3` |
 | the serial log | a USB serial adapter (or a second Pico with debugprobe) and `screen` or `minicom` | the same |
 
