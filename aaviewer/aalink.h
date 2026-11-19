@@ -12,6 +12,12 @@
  * configuration, or a picture) starts a block of its own and fills
  * blocks to its end, its last block perhaps not full.
  *
+ * The phone interleaves its channels, so the stream does too: every
+ * block has the type of the message it carries, and a message's blocks
+ * may have blocks of other types between them (video and sound: START
+ * and END mark each message's first and last block of its own type).
+ * The pictures are gathered whole; sound is played as it comes.
+ *
  * The bridge keeps the blocks from `tail` to `head` (exclusive) in its
  * RAM.  A block below head reads as itself; one at or past head reads
  * as "not ready" (flags 0, with head as it is then): the 192 reads it
@@ -57,9 +63,15 @@
 #define AALINK_START 0x0002                  /* a message's first block */
 #define AALINK_END 0x0004                    /* its last */
 #define AALINK_KEY 0x0008                    /* (on START) a key frame: a picture to start decoding at */
-#define AALINK_TYPE(f) (((f) >> 8) & 15)     /* (on START) what the message is */
+#define AALINK_TYPE(f) (((f) >> 8) & 15)     /* what the block's message is */
 #define AALINK_CONFIG 1                      /* the codec's configuration: H.264 parameter sets */
 #define AALINK_PICTURE 2                     /* a picture: H.264 slices, start codes and all */
+/* Sound, as the phone sends it (16-bit samples, little-endian, the
+ * channels interleaved), its id and timestamp taken off: */
+#define AALINK_SOUND_MEDIA 3                 /* music and the like: 48 kHz stereo */
+#define AALINK_SOUND_SPEECH 4                /* navigation's voice: 16 kHz mono */
+#define AALINK_SOUND_SYSTEM 5                /* the phone's own sounds: 16 kHz mono */
+#define AALINK_IS_SOUND(t) ((t) >= AALINK_SOUND_MEDIA && (t) <= AALINK_SOUND_SYSTEM)
 
 /* The state sector: magic, version, head, tail, the seq of the last key
  * frame's first block (AALINK_NONE: none since the phone started its
@@ -73,19 +85,27 @@
 #define AALINK_CTL_CONFIG 64
 #define AALINK_CONFIG_MAX (512 - AALINK_CTL_CONFIG)
 
-/* Input, the 192's keys and knob for the phone: reading sector
- * AALINK_INPUT_FIRST + code (one CMD17) is an event, whose code has a
- * sequence number in bits 11-9 (the next of each event, so that a read
- * made again is not taken twice), the kind in bit 8, and 8 bits of what:
+/* Input, the 192's keys and knob for the phone, and how far behind its
+ * decoding is: reading sector AALINK_INPUT_FIRST + code (one CMD17) is
+ * an event, whose code has a sequence number in bits 11-10 (the next of
+ * each event, so that a read made again is not taken twice), the kind
+ * in bits 9-8, and 8 bits of what:
  *
- *   key    (bit 8 clear): an index of aalink_keys << 1, | 1 pressed
- *   knob   (bit 8 set): the rotary controller's detents, signed
+ *   key      (kind 0): an index of aalink_keys << 1, | 1 pressed
+ *   knob     (kind 1): the rotary controller's detents, signed
+ *   backlog  (kind 2): the pictures read and not yet decoded, said at
+ *            every change and every half second; the bridge logs it.
+ *            (Holding the phone's acknowledgements while it was 2 or
+ *            more did not slow a Pixel down, and made its Android Auto
+ *            leave the split screen: 2026-11-18.)
  *
- * The sector reads as the state sector.  The bridge passes each to the
- * phone as Android Auto's input event; the codes are those the head
- * unit declares (src/aa_hu.c), as aasdk's ButtonCode has them. */
+ * The sector reads as the state sector.  Keys and the knob go to the
+ * phone as Android Auto's input event; the codes are those the head unit
+ * declares (src/aa_hu.c), as aasdk's ButtonCode has them. */
 #define AALINK_IN_KNOB 0x100
-#define AALINK_IN_CODE(seq, what) ((((seq) & 7u) << 9) | ((what) & 0x1ffu))
+#define AALINK_IN_BACKLOG 0x200
+#define AALINK_IN_KIND(c) ((c) & 0x300)
+#define AALINK_IN_CODE(seq, what) ((((seq) & 3u) << 10) | ((what) & 0x3ffu))
 #define AALINK_KEY_HOME 0
 #define AALINK_KEY_BACK 1
 #define AALINK_KEY_UP 2

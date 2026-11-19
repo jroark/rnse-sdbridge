@@ -21,9 +21,11 @@
  *
  * Reading a block tells the bridge that what came before it has been
  * taken; the bridge then lets the phone send its next picture.  So the
- * phone goes at the pace this decodes, and nothing is dropped.  Once a
- * message is read whole the next read starts at once, a single block,
- * so that the bridge has its room back while this decodes.
+ * phone may go at the pace this decodes (a Pixel does not: it sends its
+ * 30 a second regardless).  This reads all the bridge has between two
+ * pictures, keeping the backlog in its own RAM, and decodes one picture
+ * between two reads, showing only the newest, so that the sound keeps
+ * coming.
  *
  * A block that is wrong (its sum, its number, or the card processor
  * saying it did not come) is read again.  Started while the video is
@@ -62,9 +64,14 @@ static const u32 ports[2] = { 0xb5000002, 0xb500004a };
 #define HEAP 0x0c800000
 #define HEAP_END 0x0dcf0000
 
-#define RUN 32                       /* blocks a read at most */
-#define MSG_ROOM (1u << 20)          /* the messages read and not yet decoded */
-#define DONE_MAX 64
+#define RUN 64                       /* blocks a read at most: 32 KB */
+/* The pictures read and not yet decoded, and their room: the phone
+ * sends up to 30 a second whatever the acknowledgements say (a Pixel on
+ * a unit, 2026-11-18), and the 192 decodes some 10 a second of a map
+ * that moves, so they wait here, not in the bridge's small ring, which
+ * then stays free for the sound.  Some 8 s of a moving map. */
+#define MSG_ROOM (4u << 20)
+#define DONE_MAX 256
 
 /* The debug console's lines while the video runs (the counts every two
  * seconds, each input event): for the emulator's tests, built with
@@ -135,11 +142,16 @@ static void line(const char *text)
         row = 0;
 }
 
+/* Called while the program waits (main sets it: the sound fed). */
+static void (*wait_idle)(void);
+
 static void pause(u32 ms)
 {
     u32 t = millis();
     while (millis() - t < ms) {
         panel_service();
+        if (wait_idle)
+            wait_idle();
         cpu_idle();
     }
 }
@@ -569,8 +581,167 @@ static int find_link(void)
     return 1;
 }
 
+/* ---- sound ----------------------------------------------------------- */
+
+/* The phone's sound (aalink.h): its samples as they come, a FIFO for
+ * each of its sources, and the other card processor than the bridge's
+ * playing a mix of them at 44.1 kHz (src/pcm.c: a ring of blocks fed by
+ * DMA, which plays on while a picture is decoded), each source
+ * resampled to it.  The phone's clock and the converter's are not the
+ * same: each source's step is nudged by how full its FIFO is, so that it
+ * stays some 300 ms ahead (enough for a key frame's decoding and showing
+ * on a unit, 2026-11-18, where 200 ms ran dry now and then), a fraction
+ * of a per cent of pitch.  A source
+ * plays once it has that much, and stops (silence) when it runs dry.
+ * The volume knob sets the amplifier's volume (radio_volume). */
+#define SOUND_BLOCK 1024              /* stereo frames a block of the ring */
+#define SOUND_BLOCKS 12               /* 0.28 s */
+static s16 sound_ring[2 * SOUND_BLOCK * SOUND_BLOCKS] __attribute__((aligned(32)));
+static int sound_dsp = -1;
+static int volume = 12;
+
+struct source {
+    s16 *buf;
+    u32 frames, channels;            /* room, 1 or 2 */
+    u32 in, out;                     /* frames, counting up */
+    u32 frac;                        /* between out and out + 1, in 1/65536 */
+    u32 base, step;                  /* its rate over 44.1 kHz, in 1/65536 */
+    u32 target;                      /* frames to keep ahead */
+    int playing;
+    u32 dropped, dry;
+};
+#define MEDIA_FRAMES 65536            /* 1.4 s at 48 kHz */
+#define VOICE_FRAMES 32768            /* 2 s at 16 kHz */
+/* (From the heap, as messages[] is: see main.) */
+static struct source sources[3] = {
+    { 0, MEDIA_FRAMES, 2, 0, 0, 0, 71331, 71331, 14400, 0, 0, 0 },  /* 48000 / 44100, 300 ms */
+    { 0, VOICE_FRAMES, 1, 0, 0, 0, 23777, 23777, 4800, 0, 0, 0 },   /* 16000 / 44100 */
+    { 0, VOICE_FRAMES, 1, 0, 0, 0, 23777, 23777, 4800, 0, 0, 0 },
+};
+
+/* A block's samples (16-bit, little-endian) into its source's FIFO. */
+static void sound_put(int type, const u8 *p, u32 n)
+{
+    struct source *f = &sources[type - AALINK_SOUND_MEDIA];
+    u32 k, frames = n / (2 * f->channels);
+    for (k = 0; k < frames; k++) {
+        s16 *at;
+        if (f->in - f->out >= f->frames - 1) {
+            f->dropped += frames - k;
+            return;
+        }
+        at = f->buf + (f->in % f->frames) * f->channels;
+        at[0] = (s16)(p[0] | p[1] << 8);
+        if (f->channels == 2)
+            at[1] = (s16)(p[2] | p[3] << 8);
+        p += 2 * f->channels;
+        f->in++;
+    }
+}
+
+/* The frames of sound the media FIFO has room for. */
+static u32 sound_room(void)
+{
+    return sources[0].frames - 1 - (sources[0].in - sources[0].out);
+}
+
+static s32 sat(s32 v)
+{
+    return v > 32767 ? 32767 : v < -32768 ? -32768 : v;
+}
+
+/* A block of the ring: each source's next frames, resampled, added. */
+static void mix(s16 *out)
+{
+    u32 i, k;
+    for (i = 0; i < 2 * SOUND_BLOCK; i++)
+        out[i] = 0;
+    for (k = 0; k < 3; k++) {
+        struct source *f = &sources[k];
+        u32 fill = f->in - f->out;
+        s32 nudge;
+        if (!f->playing) {
+            if (fill < f->target)
+                continue;
+            f->playing = 1;
+        }
+        /* Ahead by more than target: a little faster, less: slower
+         * (at most 1/200). */
+        nudge = ((s32)fill - (s32)f->target) / 16;
+        if (nudge > (s32)(f->base / 200))
+            nudge = (s32)(f->base / 200);
+        if (nudge < -(s32)(f->base / 200))
+            nudge = -(s32)(f->base / 200);
+        f->step = (u32)((s32)f->base + nudge);
+        for (i = 0; i < SOUND_BLOCK; i++) {
+            const s16 *a, *b;
+            s32 l, r;
+            if (f->in - f->out < 2) {
+                f->playing = 0;
+                f->dry++;
+                break;
+            }
+            a = f->buf + (f->out % f->frames) * f->channels;
+            b = f->buf + ((f->out + 1) % f->frames) * f->channels;
+            /* (Fifteen bits of the fraction: a difference of up to
+             * 65535 times it stays within 32 bits.) */
+            l = a[0] + (((s32)b[0] - a[0]) * (s32)(f->frac >> 1) >> 15);
+            r = f->channels == 2 ? a[1] + (((s32)b[1] - a[1]) * (s32)(f->frac >> 1) >> 15) : l;
+            out[2 * i] = (s16)sat(out[2 * i] + l);
+            out[2 * i + 1] = (s16)sat(out[2 * i + 1] + r);
+            f->frac += f->step;
+            f->out += f->frac >> 16;
+            f->frac &= 0xffff;
+        }
+    }
+}
+
+/* The ring kept full: every block played is mixed again. */
+static void sound_pump(void)
+{
+    s16 *b;
+    if (sound_dsp < 0)
+        return;
+    while ((b = pcm_stream_block()) != 0) {
+        mix(b);
+        pcm_stream_ready();
+    }
+}
+
+/* The processor that is not the bridge's (slot ^ 1) takes the kit's
+ * PCM program; the amplifier its sound. */
+static void sound_start(void)
+{
+    int dsp = slot ^ 1;
+    u32 k;
+    for (k = 0; k < 3; k++) {
+        sources[k].in = sources[k].out = sources[k].frac = 0;
+        sources[k].playing = 0;
+    }
+    if (pcm_start(dsp)) {
+        line("SOUND: THE OTHER CARD PROCESSOR DOES NOT START");
+        return;
+    }
+    if (pcm_stream(sound_ring, SOUND_BLOCK, SOUND_BLOCKS)) {
+        pcm_stop();
+        line("SOUND: NO STREAM");
+        return;
+    }
+    sound_dsp = dsp;
+    radio_source(RADIO_DECODER, volume);
+    sound_pump();
+}
+
+static void sound_stop(void)
+{
+    if (sound_dsp >= 0)
+        pcm_stop();
+    sound_dsp = -1;
+}
+
 static void leave(void)
 {
+    sound_stop();
     sd_reader = 0;
     dsp_reset();
     cache_setup(found_ccr);
@@ -644,7 +815,7 @@ static int open_bridge(void)
 /* ---- the stream ------------------------------------------------------ */
 
 static u8 run_buf[RUN * 512] __attribute__((aligned(32)));
-static u8 messages[MSG_ROOM] __attribute__((aligned(32)));
+static u8 *messages;                 /* MSG_ROOM bytes from the heap: see main */
 static u32 msg_used;                 /* bytes of messages[] in use */
 static u32 msg_start;                /* where the message being read began */
 static int in_message, skipping, waiting_key, msg_type;
@@ -662,7 +833,7 @@ static u32 window_sector(u32 seq)
 }
 
 /* Counts for the console. */
-static u32 pictures, bytes_in, blocks_in, again, decode_us, show_us, read_us, waits, skipped, frames;
+static u32 pictures, bytes_in, blocks_in, again, decode_us, show_us, read_us, waits, skipped, frames, sound_blocks;
 static u32 last_report;
 
 /* A block of a run: 1 taken, 0 not yet there, -1 wrong. */
@@ -681,6 +852,16 @@ static int take(const u8 *b)
         sum += be32(b + AALINK_HEADER + i);
     if (used > AALINK_PAYLOAD || sum != be32(b + 16))
         return -1;
+    /* Sound: played as it comes, not gathered (its blocks come between
+     * a picture's). */
+    if (AALINK_IS_SOUND(AALINK_TYPE(flags))) {
+        sound_put((int)AALINK_TYPE(flags), b + AALINK_HEADER, used);
+        next_seq++;
+        blocks_in++;
+        bytes_in += used;
+        sound_blocks++;
+        return 1;
+    }
     if (flags & AALINK_START) {
         /* A message cut short (should not happen): what came is dropped. */
         if (in_message)
@@ -787,10 +968,30 @@ static void send_input(u32 what)
 #endif
 }
 
+/* The pictures read and not yet decoded, said to the bridge at every
+ * change and every half second (aalink.h, "backlog"). */
+static void say_backlog(void)
+{
+    static u32 said = 0xffffffff, at;
+    u32 n = ndone > 255 ? 255 : (u32)ndone;
+    if (n == said && millis() - at < 500)
+        return;
+    said = n;
+    at = millis();
+    send_input(AALINK_IN_BACKLOG | n);
+}
+
 static void inputs(void)
 {
     u32 i;
-    int d = panel_knob(KNOB_SELECT);
+    int v = panel_knob(KNOB_VOLUME), d = panel_knob(KNOB_SELECT);
+    /* The volume knob: the unit's amplifier, as everywhere. */
+    if (v) {
+        volume += v;
+        volume = volume < 0 ? 0 : volume > 30 ? 30 : volume;
+        if (sound_dsp >= 0)
+            radio_volume(volume);
+    }
     while (d) {
         int k = d > 100 ? 100 : d < -100 ? -100 : d;
         send_input(AALINK_IN_KNOB | ((u32)k & 0xff));
@@ -819,11 +1020,38 @@ static void inputs(void)
  * card processor is idle then, between two of its commands. */
 static int link_up;
 
+/* While a picture is decoded the card processor is idle: what the
+ * bridge has is read meanwhile too, every 8 ms (a block every 20 ms to
+ * see, when it had nothing), so that its small ring never fills while a
+ * picture takes 100-200 ms to decode.  (It did, on a unit, 2026-11-18:
+ * the bridge then held the phone's bytes back and dropped sound, and the
+ * phone's sound stopped for want of its acknowledgements.)  What comes
+ * is added after the messages waiting, so the one being decoded is not
+ * touched. */
+static u32 busy_read_at;
+static int in_busy_read;
+
+static void busy_read(void)
+{
+    u32 now = millis(), want = (s32)(head_hint - next_seq) > 0 ? head_hint - next_seq : 0;
+    if (in_busy_read || now - busy_read_at < (want ? 8u : 20u))
+        return;
+    if (sound_room() < RUN * (AALINK_PAYLOAD / 4) || msg_used + RUN * 512 >= MSG_ROOM)
+        return;
+    in_busy_read = 1;
+    busy_read_at = now;
+    (void)read_blocks(want ? want : 1);
+    in_busy_read = 0;
+}
+
 static void busy(void)
 {
     panel_service();
-    if (link_up && !dead)
+    sound_pump();
+    if (link_up && !dead) {
+        busy_read();
         inputs();
+    }
 }
 
 /* ---- decoding ------------------------------------------------------ */
@@ -834,7 +1062,8 @@ static u32 width, height;
 static u32 crc;
 #endif
 
-static void decode(u8 *p, u32 len)
+/* draw: the pictures shown (else only decoded: a newer one waits). */
+static void decode(u8 *p, u32 len, int draw)
 {
     u32 t0 = micros();
     while (len > 0) {
@@ -888,11 +1117,13 @@ static void decode(u8 *p, u32 len)
             console_hex(crc);
             console_puts("\n");
 #endif
-            if (!showing) {
-                showing = 1;
-                palette();
+            if (draw) {
+                if (!showing) {
+                    showing = 1;
+                    palette();
+                }
+                show(pic, width, height);
             }
-            show(pic, width, height);
             frames++;
             t0 = micros();
             show_us += t0 - t1;
@@ -901,15 +1132,78 @@ static void decode(u8 *p, u32 len)
     decode_us += micros() - t0;
 }
 
+/* The first message read whole decoded (only one: reading again in
+ * between keeps the sound coming, which a run of pictures decoded one
+ * after the other, 100 ms each, would let run dry). */
+/* Behind: the phone sends its 30 pictures a second whatever this does
+ * (a Pixel with Apple Music beside Maps, on a unit, 2026-11-18: some 22
+ * a second decoded, and 8 s behind within half a minute).  While more
+ * than LAG_DROP wait, a picture that no later one is made of (its NAL
+ * units' nal_ref_idc 0) is dropped undecoded.  The bridge, told the
+ * backlog, holds the phone's acknowledgements (within the phone's
+ * timeout), which slows the phone down.  (Not a key frame asked for to
+ * start again from: the phone's video focus taken away and given back
+ * makes its Android Auto rebuild its screen, often as its launcher: a
+ * Pixel, 2026-11-18.) */
+#define LAG_DROP 8
+static u32 dropped_pictures;
+
+/* Whether a picture is one no later picture refers to: its first VCL
+ * NAL unit's nal_ref_idc is 0. */
+static int unreferenced(const u8 *p, u32 n)
+{
+    u32 i;
+    for (i = 0; i + 3 < n && i < 256; i++) {
+        u32 t;
+        if (p[i] || p[i + 1] || p[i + 2] != 1)
+            continue;
+        t = p[i + 3] & 0x1f;
+        if (t == 1 || t == 5)
+            return !(p[i + 3] & 0x60);
+        i += 2;
+    }
+    return 0;
+}
+
+/* The first waiting message gone, undecoded or decoded. */
+static void done_pop(void)
+{
+    int i;
+    /* (Field by field: a structure's copy would be a library call the
+     * kit does not have.) */
+    for (i = 1; i < ndone; i++) {
+        done[i - 1].at = done[i].at;
+        done[i - 1].len = done[i].len;
+        done[i - 1].type = done[i].type;
+    }
+    ndone--;
+}
+
 static void decode_done(void)
 {
     int i;
-    for (i = 0; i < ndone; i++) {
-        if (done[i].type == AALINK_PICTURE)
-            pictures++;
-        decode(messages + done[i].at, done[i].len);
+    if (!ndone)
+        return;
+    {
+        while (ndone > LAG_DROP && done[0].type == AALINK_PICTURE && unreferenced(messages + done[0].at, done[0].len)) {
+            dropped_pictures++;
+            done_pop();
+        }
+        if (ndone) {
+            if (done[0].type == AALINK_PICTURE)
+                pictures++;
+            /* Shown only when no newer picture is waiting: every one has
+             * to be decoded (the next is made of it), but showing one
+             * that is replaced at once is 40 ms for nothing. */
+            decode(messages + done[0].at, done[0].len, ndone == 1);
+            done_pop();
+        }
     }
-    ndone = 0;
+    if (ndone)
+        return;
+    /* (Field by field: a structure's copy would be a library call the
+     * kit does not have.) */
+    (void)i;
     /* The message being read, if any, to the front. */
     if (in_message && !skipping && msg_start > 0) {
         /* (Forward: the copy is below what it copies.) */
@@ -953,6 +1247,14 @@ static void report(void)
     q = put_dec(q, skipped);
     q = put_str(q, "; inputs ");
     q = put_dec(q, inputs_sent);
+    q = put_str(q, "; dropped ");
+    q = put_dec(q, dropped_pictures);
+    q = put_str(q, "; sound blocks ");
+    q = put_dec(q, sound_blocks);
+    q = put_str(q, " dry ");
+    q = put_dec(q, sources[0].dry + sources[1].dry + sources[2].dry);
+    q = put_str(q, " dropped ");
+    q = put_dec(q, sources[0].dropped + sources[1].dropped + sources[2].dropped);
     *q = 0;
     console_puts(text);
     console_puts("\n");
@@ -993,7 +1295,7 @@ static int begin(void)
     line(text);
     if (n && n <= AALINK_CONFIG_MAX) {
         memcpy(messages, b + AALINK_CTL_CONFIG, n);
-        decode(messages, n);
+        decode(messages, n, 1);
     }
     msg_used = msg_start = 0;
     in_message = skipping = 0;
@@ -1060,8 +1362,17 @@ int main(void)
      * 2026-11-18, the keys seemed dead). */
     h264bsdIdle = busy;
     show_idle = busy;
+    wait_idle = sound_pump;
+    /* The big buffers from the heap, not .bss: the start-up code clears
+     * .bss a word at a time before the tick (and with it the watchdog's
+     * strobe) runs, and 4.5 MB of it outlasted the watchdog's 105 ms on
+     * a unit (2026-11-18: reset to the stock software at once). */
+    messages = malloc(MSG_ROOM);
+    sources[0].buf = malloc(2 * MEDIA_FRAMES * sizeof(s16));
+    sources[1].buf = malloc(VOICE_FRAMES * sizeof(s16));
+    sources[2].buf = malloc(VOICE_FRAMES * sizeof(s16));
     dec = h264bsdAlloc();
-    if (!dec || h264bsdInit(dec, 1) != 0) {
+    if (!messages || !sources[0].buf || !sources[1].buf || !sources[2].buf || !dec || h264bsdInit(dec, 1) != 0) {
         line("NO MEMORY FOR THE DECODER");
         for (;;)
             pause(1000);
@@ -1091,18 +1402,44 @@ int main(void)
             if (dead)
                 break;
         }
+        sound_start();
         last_report = millis();
         link_up = 1;
         while (!dead) {
             u32 want = (s32)(head_hint - next_seq) > 0 ? head_hint - next_seq : 1;
-            r = read_blocks(want);
+            sound_pump();
+            /* No more read while the sound has no room for a run of it
+             * (the phone sends it as it plays: only a bridge that has
+             * kept much of it gives so much at once). */
+            if (sound_room() < RUN * (AALINK_PAYLOAD / 4)) {
+                pause(5);
+                inputs();
+                continue;
+            }
+            /* All the bridge has (up to 256 KB, some 130 ms at 2 MB/s),
+             * run after run, before the next picture is decoded: its
+             * ring emptied every round, so that the sound never waits
+             * behind pictures there (on a unit, 2026-11-18, it was
+             * dropped while the 192 decoded a moving map). */
+            {
+                u32 got = 0;
+                do {
+                    r = read_blocks(want);
+                    if (r <= 0)
+                        break;
+                    got += (u32)r;
+                    want = (s32)(head_hint - next_seq) > 0 ? head_hint - next_seq : 0;
+                    sound_pump();
+                } while (want && got < 512 && sound_room() >= RUN * (AALINK_PAYLOAD / 4) && msg_used + RUN * 512 < MSG_ROOM);
+                if (r > 0 || got)
+                    r = (int)got;
+            }
             if (r < 0)
                 break;
+            say_backlog();
             if (ndone) {
-                /* The next read at once, a block, so that the bridge
-                 * lets go of what has been read before this decodes. */
-                (void)read_blocks(1);
                 decode_done();
+                say_backlog();
                 idle_since = millis();
             } else if (r == 0) {
                 /* Nothing new: a little later, and the state now and
@@ -1126,6 +1463,9 @@ int main(void)
             report();
         }
         link_up = 0;
+        /* (open_bridge may look at the other slot: its processor is
+         * the sound's.) */
+        sound_stop();
         line("THE CARD PROCESSOR STOPPED: STARTING AGAIN");
         dsp_reset();
         pause(500);

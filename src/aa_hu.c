@@ -373,10 +373,10 @@ static int sound(struct aa_hu *h, uint8_t channel, uint16_t id, const uint8_t *p
     struct aap_pb b;
     switch (id) {
     case AA_AV_SETUP_REQUEST:
-        LOG("sound channel %d setup request: ok\n", channel);
+        LOG("sound channel %d setup request: ok, %d messages ahead of the acknowledgements\n", channel, AA_HU_SOUND_UNACKED);
         queue(h, channel, 0, AA_AV_SETUP_RESPONSE, &b);
         aap_pb_varint(&b, 1, 2);           /* ok */
-        aap_pb_varint(&b, 2, (uint64_t)h->max_unacked);
+        aap_pb_varint(&b, 2, AA_HU_SOUND_UNACKED);
         aap_pb_varint(&b, 3, 0);
         done(h, &b);
         return 1;

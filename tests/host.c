@@ -462,6 +462,10 @@ static uint32_t g16(const uint8_t *p)
     return (uint32_t)p[0] << 8 | p[1];
 }
 
+/* A read the 192 starts at sector `index`, as the bridge's data side
+ * takes it: its event first, then the sector. */
+static void link_read(struct aastream *st, uint32_t index, uint8_t *b);
+
 /* Window sector `seq` of a stream, as bytes. */
 static void link_sector(struct aastream *st, uint32_t index, uint8_t *b)
 {
@@ -470,6 +474,12 @@ static void link_sector(struct aastream *st, uint32_t index, uint8_t *b)
     aastream_sector(st, index, w);
     for (i = 0; i < 512; i++)
         b[i] = (uint8_t)(w[i / 4] >> (24 - 8 * (i % 4)));
+}
+
+static void link_read(struct aastream *st, uint32_t index, uint8_t *b)
+{
+    aastream_request(st, index);
+    link_sector(st, index, b);
 }
 
 /* A block read as the 192 reads it: its header checked, its payload
@@ -513,9 +523,9 @@ static void test_aastream(void)
 
     /* The configuration: one block, kept in the state sector too. */
     CHECK(!aastream_is_key(config, sizeof config));
-    aastream_begin(&st, AALINK_CONFIG, 0);
-    CHECK(aastream_add(&st, config, sizeof config) == sizeof config);
-    CHECK(aastream_end(&st) == 0);
+    aastream_begin(&st, 0, AALINK_CONFIG, 0);
+    CHECK(aastream_add(&st, 0, config, sizeof config) == sizeof config);
+    CHECK(aastream_end(&st, 0) == 0);
     len = 0;
     f = take_block(&st, 0, got, &len);
     CHECK(f == (AALINK_READY | AALINK_START | AALINK_END | AALINK_CONFIG << 8));
@@ -532,16 +542,16 @@ static void test_aastream(void)
         big[i] = (uint8_t)(i * 13 + 1);
     big[0] = big[1] = big[2] = 0, big[3] = 1, big[4] = 0x65;
     CHECK(aastream_is_key(big, 64));
-    aastream_begin(&st, AALINK_PICTURE, 1);
-    CHECK(aastream_add(&st, big, 700) == 700 && aastream_add(&st, big + 700, 500) == 500);
+    aastream_begin(&st, 0, AALINK_PICTURE, 1);
+    CHECK(aastream_add(&st, 0, big, 700) == 700 && aastream_add(&st, 0, big + 700, 500) == 500);
     /* Until its end, the last block is not out: two of three are. */
     CHECK(st.head == 3);
-    CHECK(aastream_end(&st) == 3);
+    CHECK(aastream_end(&st, 0) == 3);
     len = 0;
     f = take_block(&st, 1, got, &len);
     CHECK(f == (AALINK_READY | AALINK_START | AALINK_KEY | AALINK_PICTURE << 8));
-    CHECK(take_block(&st, 2, got, &len) == AALINK_READY);
-    CHECK(take_block(&st, 3, got, &len) == (AALINK_READY | AALINK_END));
+    CHECK(take_block(&st, 2, got, &len) == (AALINK_READY | AALINK_PICTURE << 8));
+    CHECK(take_block(&st, 3, got, &len) == (AALINK_READY | AALINK_END | AALINK_PICTURE << 8));
     CHECK(len == 1200 && memcmp(got, big, 1200) == 0);
     len = 0;
     CHECK(take_block(&st, 4, got, &len) == 0);
@@ -552,9 +562,9 @@ static void test_aastream(void)
     CHECK(g32(b + 8) == 4);
 
     /* Exactly a block's worth: one block, END on it. */
-    aastream_begin(&st, AALINK_PICTURE, 0);
-    CHECK(aastream_add(&st, big, AALINK_PAYLOAD) == AALINK_PAYLOAD);
-    CHECK(aastream_end(&st) == 4);
+    aastream_begin(&st, 0, AALINK_PICTURE, 0);
+    CHECK(aastream_add(&st, 0, big, AALINK_PAYLOAD) == AALINK_PAYLOAD);
+    CHECK(aastream_end(&st, 0) == 4);
     len = 0;
     CHECK(take_block(&st, 4, got, &len) == (AALINK_READY | AALINK_START | AALINK_END | AALINK_PICTURE << 8));
     CHECK(len == AALINK_PAYLOAD);
@@ -564,9 +574,9 @@ static void test_aastream(void)
     CHECK(room == (16 - 5) * AALINK_PAYLOAD);
     for (i = 0; i < sizeof big; i++)
         big[i] = (uint8_t)(i * 7 + i / 300);
-    aastream_begin(&st, AALINK_PICTURE, 0);
+    aastream_begin(&st, 0, AALINK_PICTURE, 0);
     first = st.head;
-    taken = aastream_add(&st, big, sizeof big);
+    taken = aastream_add(&st, 0, big, sizeof big);
     CHECK(taken == room && aastream_room(&st) == 0);
     /* The 192 reads blocks 0-6 and starts its next read at 7: they go. */
     aastream_consumed(&st, 7);
@@ -578,14 +588,14 @@ static void test_aastream(void)
     aastream_consumed(&st, 3);
     CHECK(st.tail == 7);
     while (taken < sizeof big) {
-        uint32_t k = aastream_add(&st, big + taken, sizeof big - taken);
+        uint32_t k = aastream_add(&st, 0, big + taken, sizeof big - taken);
         taken += k;
         if (taken < sizeof big) {
             CHECK(k > 0 || st.head > st.tail);
             aastream_consumed(&st, st.head);
         }
     }
-    seq = aastream_end(&st);
+    seq = aastream_end(&st, 0);
     /* Read back from its first block, as far as it is still kept: here
      * only the tail end, so read what is there and check its place. */
     CHECK(seq == first + (sizeof big + AALINK_PAYLOAD - 1) / AALINK_PAYLOAD - 1);
@@ -607,8 +617,12 @@ static void test_aastream(void)
     aastream_init(&st, link_ring, 16);
     link_sector(&st, AALINK_CTL_STATE, b);
     CHECK(st.key_asked == 0);
-    link_sector(&st, AALINK_CTL_KEY, b);
+    link_read(&st, AALINK_CTL_KEY, b);
     CHECK(st.key_asked == 1 && g32(b) == AALINK_CTL_MAGIC);
+    /* Made without being asked for (ahead, in a multiple read): no
+     * key frame asked. */
+    link_sector(&st, AALINK_CTL_KEY, b);
+    CHECK(st.key_asked == 1);
     /* Which sectors are the window's: not the control sectors, not the
      * input sectors after it (a knob's read is no place in the stream). */
     {
@@ -624,11 +638,11 @@ static void test_aastream(void)
         uint16_t code;
         uint32_t base = AALINK_INPUT_FIRST;
         CHECK(!aastream_input_take(&st, &code));
-        link_sector(&st, base + AALINK_IN_CODE(1, AALINK_KEY_ENTER << 1 | 1), b);
+        link_read(&st, base + AALINK_IN_CODE(1, AALINK_KEY_ENTER << 1 | 1), b);
         CHECK(g32(b) == AALINK_CTL_MAGIC);
-        link_sector(&st, base + AALINK_IN_CODE(1, AALINK_KEY_ENTER << 1 | 1), b);
-        link_sector(&st, base + AALINK_IN_CODE(2, AALINK_KEY_ENTER << 1), b);
-        link_sector(&st, base + AALINK_IN_CODE(3, AALINK_IN_KNOB | (uint8_t)-3), b);
+        link_read(&st, base + AALINK_IN_CODE(1, AALINK_KEY_ENTER << 1 | 1), b);
+        link_read(&st, base + AALINK_IN_CODE(2, AALINK_KEY_ENTER << 1), b);
+        link_read(&st, base + AALINK_IN_CODE(3, AALINK_IN_KNOB | (uint8_t)-3), b);
         CHECK(g32(b + AALINK_CTL_O_INPUTS) == 3);
         CHECK(aastream_input_take(&st, &code) && code == AALINK_IN_CODE(1, AALINK_KEY_ENTER << 1 | 1));
         CHECK(aastream_input_take(&st, &code) && code == AALINK_IN_CODE(2, AALINK_KEY_ENTER << 1));
@@ -636,15 +650,78 @@ static void test_aastream(void)
         CHECK(!aastream_input_take(&st, &code));
         /* More than the queue holds: the rest dropped, nothing broken. */
         for (i = 0; i < 40; i++)
-            link_sector(&st, base + AALINK_IN_CODE(i, AALINK_IN_KNOB | 1), b);
+            link_read(&st, base + AALINK_IN_CODE(i, AALINK_IN_KNOB | 1), b);
         for (i = 0; aastream_input_take(&st, &code); i++)
             ;
         CHECK(i == AASTREAM_INPUTS);
+        /* An input sector made ahead, not asked for (a multiple read
+         * that ended at the window's end): no event. */
+        link_sector(&st, base + 0, b);
+        link_sector(&st, base + 1, b);
+        CHECK(!aastream_input_take(&st, &code));
     }
     /* Gone out: one past the last block sent whole. */
     aastream_went_out(&st, 4);
     aastream_went_out(&st, 2);
     CHECK(st.sent == 5);
+}
+
+/* Video and sound interleaved, as the phone's frames come: a picture
+ * under way with sound messages between its pieces, each gathered back
+ * whole by its type, START and END per message. */
+static uint8_t mix_ring[64][512];
+
+static void test_interleaved(void)
+{
+    static struct aastream st;
+    static uint8_t pic[3000], snd[2][1000], got_pic[4000], got_snd[4000];
+    uint32_t i, seq, np = 0, ns = 0, starts = 0, ends = 0;
+    for (i = 0; i < sizeof pic; i++)
+        pic[i] = (uint8_t)(i * 3 + 1);
+    for (i = 0; i < sizeof snd[0]; i++) {
+        snd[0][i] = (uint8_t)(i * 5 + 2);
+        snd[1][i] = (uint8_t)(i * 7 + 3);
+    }
+    aastream_init(&st, mix_ring, 64);
+    aastream_begin(&st, 0, AALINK_PICTURE, 1);
+    CHECK(aastream_add(&st, 0, pic, 1000) == 1000);
+    aastream_begin(&st, 1, AALINK_SOUND_MEDIA, 0);
+    CHECK(aastream_add(&st, 1, snd[0], 1000) == 1000);
+    aastream_end(&st, 1);
+    CHECK(aastream_add(&st, 0, pic + 1000, 1500) == 1500);
+    aastream_begin(&st, 1, AALINK_SOUND_MEDIA, 0);
+    CHECK(aastream_add(&st, 1, snd[1], 600) == 600);
+    CHECK(aastream_add(&st, 0, pic + 2500, 500) == 500);
+    CHECK(aastream_add(&st, 1, snd[1] + 600, 400) == 400);
+    aastream_end(&st, 1);
+    aastream_end(&st, 0);
+    CHECK(st.key == 0);
+    for (seq = 0; seq < st.head; seq++) {
+        uint8_t b[512];
+        uint32_t flags, used, k;
+        link_sector(&st, AALINK_CTL_SECTORS + seq, b);
+        CHECK(g32(b) == AALINK_BLOCK_MAGIC && g32(b + 4) == seq);
+        flags = g16(b + 12);
+        used = g16(b + 14);
+        CHECK(flags & AALINK_READY);
+        if (flags & AALINK_START)
+            starts++;
+        if (flags & AALINK_END)
+            ends++;
+        for (k = 0; k < used; k++) {
+            if (AALINK_TYPE(flags) == AALINK_PICTURE)
+                got_pic[np++] = b[AALINK_HEADER + k];
+            else if (AALINK_TYPE(flags) == AALINK_SOUND_MEDIA)
+                got_snd[ns++] = b[AALINK_HEADER + k];
+            else
+                CHECK(0);
+        }
+        if (seq == 0)
+            CHECK((flags & (AALINK_START | AALINK_KEY)) == (AALINK_START | AALINK_KEY) && AALINK_TYPE(flags) == AALINK_PICTURE);
+    }
+    CHECK(np == sizeof pic && memcmp(got_pic, pic, sizeof pic) == 0);
+    CHECK(ns == 2000 && memcmp(got_snd, snd[0], 1000) == 0 && memcmp(got_snd + 1000, snd[1], 1000) == 0);
+    CHECK(starts == 3 && ends == 3);
 }
 
 /* AALINK.BIN in the volume: in the directory when there is a stream, one
@@ -698,17 +775,42 @@ static void test_link_file(void)
     volume_link = 0;
 }
 
-/* sdbridge/tests/host IMAGE STREAM.264: the card with AALINK.BIN whose
+/* sdbridge/tests/host IMAGE STREAM.264 [MS]: the card with AALINK.BIN whose
  * stream holds the H.264 file as a phone would send it, its parameter
  * sets as a configuration message and each picture as one (for
  * tests/aaviewer.rs): as if the 192 had not yet read any of it. */
-static int write_image(const char *path, const char *h264)
+/* A 1 kHz tone as the phone's media channel sends sound: 48 kHz,
+ * stereo, 16-bit little-endian, the left at half the right's level. */
+static uint32_t tone_at;
+
+static void tone(struct aastream *st, uint32_t frames)
+{
+    static uint8_t buf[4 * 2400];
+    uint32_t i;
+    if (frames > 2400)
+        frames = 2400;
+    for (i = 0; i < frames; i++, tone_at++) {
+        /* A sine by its quarter: 48 samples a cycle. */
+        static const int16_t q[13] = { 0, 2139, 4240, 6270, 8192, 9974, 11585, 12998, 14189, 15137, 15826, 16244, 16384 };
+        uint32_t k = tone_at % 48;
+        int v = k <= 12 ? q[k] : k <= 24 ? q[24 - k] : k <= 36 ? -q[k - 24] : -q[48 - k];
+        buf[4 * i] = (uint8_t)(v / 2);
+        buf[4 * i + 1] = (uint8_t)((v / 2) >> 8);
+        buf[4 * i + 2] = (uint8_t)v;
+        buf[4 * i + 3] = (uint8_t)(v >> 8);
+    }
+    aastream_begin(st, 1, AALINK_SOUND_MEDIA, 0);
+    aastream_add(st, 1, buf, 4 * frames);
+    aastream_end(st, 1);
+}
+
+static int write_image(const char *path, const char *h264, uint32_t sound_ms)
 {
     static struct aastream st;
     FILE *f = fopen(h264, "rb"), *out;
     uint8_t *data, *ring, b[512];
     long n;
-    uint32_t i, start, w[128], blocks;
+    uint32_t i, k, start, w[128], blocks;
     int in_config = -1;
     if (!f || fseek(f, 0, SEEK_END) || (n = ftell(f)) <= 0 || fseek(f, 0, SEEK_SET))
         return 2;
@@ -717,7 +819,7 @@ static int write_image(const char *path, const char *h264)
         return 2;
     fclose(f);
     /* Room for all of it: nothing is read before the image is written. */
-    blocks = (uint32_t)n / AALINK_PAYLOAD + (uint32_t)n / 100 + 64;
+    blocks = (uint32_t)n / AALINK_PAYLOAD + (uint32_t)n / 100 + 64 + sound_ms * 192 / AALINK_PAYLOAD + 2 * sound_ms;
     ring = malloc((size_t)blocks * 512);
     if (!ring)
         return 2;
@@ -745,22 +847,30 @@ static int write_image(const char *path, const char *h264)
             next--;
         if (type == 7 || type == 8) {
             if (in_config != 1) {
-                aastream_begin(&st, AALINK_CONFIG, 0);
+                aastream_begin(&st, 0, AALINK_CONFIG, 0);
                 in_config = 1;
             }
-            aastream_add(&st, data + start, next - start);
+            aastream_add(&st, 0, data + start, next - start);
             start = next;
         } else if (type == 1 || type == 5) {
             if (in_config == 1)
-                aastream_end(&st);
+                aastream_end(&st, 0);
             in_config = 0;
-            aastream_begin(&st, AALINK_PICTURE, type == 5);
-            aastream_add(&st, data + start, next - start);
-            aastream_end(&st);
+            aastream_begin(&st, 0, AALINK_PICTURE, type == 5);
+            aastream_add(&st, 0, data + start, next - start);
+            aastream_end(&st, 0);
+            /* A picture's time of sound after each, at the 192's ten
+             * pictures a second, as a phone's (sent as it plays) comes
+             * between them. */
+            for (k = 0; k < 3 && sound_ms && tone_at < sound_ms * 48; k++)
+                tone(&st, 1600);
             start = next;
         }
         i = next;
     }
+    /* The rest of the sound after the pictures. */
+    while (sound_ms && tone_at < sound_ms * 48)
+        tone(&st, sound_ms * 48 - tone_at < 1600 ? sound_ms * 48 - tone_at : 1600);
     vol_stream = st;
     volume_link = vol_link;
     out = fopen(path, "wb");
@@ -780,8 +890,8 @@ static int write_image(const char *path, const char *h264)
 int main(int argc, char **argv)
 {
     card_reset(&card);
-    if (argc == 3)
-        return write_image(argv[1], argv[2]);
+    if (argc == 3 || argc == 4)
+        return write_image(argv[1], argv[2], argc == 4 ? (uint32_t)atoi(argv[3]) : 0);
     /* sdbridge/tests/host IMAGE: the whole card into a file (for
      * tests/linkbench.rs). */
     if (argc == 2) {
@@ -808,6 +918,7 @@ int main(int argc, char **argv)
     test_program_file();
     test_aap();
     test_aastream();
+    test_interleaved();
     test_link_file();
     printf(failures ? "sdbridge host tests: %d FAILED\n" : "sdbridge host tests: all passed\n", failures);
     return failures != 0;

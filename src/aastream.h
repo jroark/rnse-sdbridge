@@ -21,9 +21,17 @@ struct aastream {
     volatile uint32_t head;       /* the next block to complete; those below are ready */
     volatile uint32_t tail;       /* the oldest block kept */
     volatile uint32_t sent;       /* one past the last block that has gone out whole */
-    uint32_t fill;                /* payload bytes in the block at head (0: none begun) */
+    uint32_t fill;                /* payload bytes in the block at head */
     uint16_t flags;               /* for the block at head */
-    int in_message;
+    int open;                     /* the channel whose block is at head, -1 none */
+    /* Each channel's message under way (video's and the sound's are
+     * interleaved: aalink.h). */
+#define AASTREAM_CHANNELS 4       /* 0 video; 1-3 sound: media, speech, system */
+    struct aastream_channel {
+        int in_message;
+        uint8_t type;
+        uint16_t pending;         /* START (and KEY) for its next block */
+    } ch[AASTREAM_CHANNELS];
     uint32_t key;                 /* first block of the last key frame, or AALINK_NONE */
     uint16_t state;               /* AALINK_PHONE, AALINK_VIDEO */
     uint16_t width, height;
@@ -42,21 +50,31 @@ struct aastream {
 void aastream_init(struct aastream *s, void *ring, uint32_t blocks);
 /* Payload bytes that can be added before the ring is full. */
 uint32_t aastream_room(const struct aastream *s);
-/* A message: type AALINK_CONFIG or AALINK_PICTURE, key when it is a key
+/* A message on channel ch (0 video, 1-3 sound): type AALINK_CONFIG or
+ * AALINK_PICTURE (channel 0) or one of the sound's, key when it is a key
  * frame (aastream_is_key says).  aastream_add takes no more than
  * aastream_room allows: the bytes it took.  aastream_end publishes the
- * last block and returns its seq. */
-void aastream_begin(struct aastream *s, int type, int key);
-uint32_t aastream_add(struct aastream *s, const uint8_t *p, uint32_t n);
-uint32_t aastream_end(struct aastream *s);
+ * message's last block and returns its seq.  The channels' messages may
+ * be under way at the same time: their blocks are interleaved. */
+void aastream_begin(struct aastream *s, int ch, int type, int key);
+uint32_t aastream_add(struct aastream *s, int ch, const uint8_t *p, uint32_t n);
+uint32_t aastream_end(struct aastream *s, int ch);
 /* Whether H.264 bytes (start codes and all) have a slice of a key frame
  * (an IDR, NAL type 5) among their first NAL units. */
 int aastream_is_key(const uint8_t *p, uint32_t n);
 
-/* Sector `index` of AALINK.BIN (control sectors, then the window) as
- * 128 words, each its four bytes most significant first.  Reading
- * AALINK_CTL_KEY counts a key frame asked for. */
+/* Sector `index` of AALINK.BIN (control sectors, the window, the input
+ * sectors) as 128 words, each its four bytes most significant first.
+ * Nothing else: a sector is also made ahead of being asked for (the
+ * next of a multiple read), so making one says nothing. */
 void aastream_sector(struct aastream *s, uint32_t index, uint32_t *words);
+/* The 192 has started a read at sector `index` of AALINK.BIN: an input
+ * sector's event, or AALINK_CTL_KEY's key frame asked for.  (Taken when
+ * the sector was made, the first input sectors, made ahead after a read
+ * that ended at the window's end, were a HOME let go and pressed, and
+ * Android Auto went to its launcher every two minutes or so: a unit,
+ * 2026-11-18.) */
+void aastream_request(struct aastream *s, uint32_t index);
 /* Whether sector `index` of AALINK.BIN is one of the window's (not a
  * control sector before it nor an input sector after it), and which. */
 int aastream_in_window(uint32_t index, uint32_t *window_index);
