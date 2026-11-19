@@ -25,8 +25,10 @@ fn build() -> Option<Vec<u8>> {
     if let Some(program) = built.as_ref() {
         return program.clone();
     }
-    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
-    let make = |extra: &str| std::process::Command::new("sh").arg(sdk.join("build.sh")).args(["192", "linkbench"])
+    let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    // The kit: RNSE_SDK, or rnse's sdk/ beside this directory.
+    let sdk = std::env::var_os("RNSE_SDK").map(std::path::PathBuf::from).unwrap_or_else(|| here.join("../sdk"));
+    let make = |extra: &str| std::process::Command::new("sh").arg(sdk.join("build.sh")).arg("192").arg(here.join("linkbench"))
         .env("EXTRA_CFLAGS", extra).output();
     let program = match make("") {
         Ok(out) if out.status.success() => Some(std::fs::read(sdk.join("out/linkbench-192.bin")).unwrap()),
@@ -183,8 +185,8 @@ fn link_benchmark_reads_the_bridge_s_volume() {
     let dir = std::env::temp_dir().join(format!("rnse-sdbridge-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let tool = dir.join("host");
-    let src = root.join("sdbridge/src");
-    let Ok(cc) = std::process::Command::new("cc").args(["-O2", "-o"]).arg(&tool).arg(root.join("sdbridge/tests/host.c"))
+    let src = root.join("src");
+    let Ok(cc) = std::process::Command::new("cc").args(["-O2", "-o"]).arg(&tool).arg(root.join("tests/host.c"))
         .arg(src.join("card.c")).arg(src.join("volume.c")).arg(src.join("crc.c")).arg(src.join("aap.c"))
         .arg(src.join("aastream.c")).output() else { return };
     assert!(cc.status.success(), "{}", String::from_utf8_lossy(&cc.stderr));

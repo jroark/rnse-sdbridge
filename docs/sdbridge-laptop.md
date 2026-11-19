@@ -48,7 +48,7 @@ for the Raspberry Pi Pico in `sdbridge/out/pico/`:
 | `SDPHONE.UF2` | the phone on the desk: accessory mode and Android Auto's version exchange (works: seen 2026-11-17) |
 | `SDHANDSHAKE.UF2` | the TLS handshake with the certificate it is given; only built when given one (below) |
 | `SDSTREAM.UF2` | the same, then a head unit: the phone's video counted and acknowledged, its rate logged each second; built with `SDHANDSHAKE.UF2` |
-| `SDLINK.UF2` | the two in one: the phone's video into the 192's slot as `AALINK.BIN`, for `sdk/examples/aaviewer` (`docs/sdbridge.md`, "The phone's video into the slot"); built with `SDHANDSHAKE.UF2` |
+| `SDLINK.UF2` | the two in one: the phone's video into the 192's slot as `AALINK.BIN`, for `aaviewer/` (`docs/sdbridge.md`, "The phone's video into the slot"); built with `SDHANDSHAKE.UF2` |
 
 ### The test certificate for `SDHANDSHAKE.UF2`
 

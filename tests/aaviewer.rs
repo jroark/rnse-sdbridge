@@ -33,8 +33,10 @@ fn build() -> Option<Vec<u8>> {
 }
 
 fn build_once() -> Option<Vec<u8>> {
-    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
-    let out = std::process::Command::new("sh").arg(sdk.join("build.sh")).args(["192", "aaviewer"])
+    let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    // The kit: RNSE_SDK, or rnse's sdk/ beside this directory.
+    let sdk = std::env::var_os("RNSE_SDK").map(std::path::PathBuf::from).unwrap_or_else(|| here.join("../sdk"));
+    let out = std::process::Command::new("sh").arg(sdk.join("build.sh")).arg("192").arg(here.join("aaviewer"))
         .env("EXTRA_CFLAGS", "-DAA_CRC").output().ok()?;
     if !out.status.success() {
         let text = String::from_utf8_lossy(&out.stderr);
@@ -43,7 +45,7 @@ fn build_once() -> Option<Vec<u8>> {
     }
     let program = std::fs::read(sdk.join("out/aaviewer-192.bin")).unwrap();
     // The ordinary build back, for the card.
-    let _ = std::process::Command::new("sh").arg(sdk.join("build.sh")).args(["192", "aaviewer"]).output();
+    let _ = std::process::Command::new("sh").arg(sdk.join("build.sh")).arg("192").arg(here.join("aaviewer")).output();
     Some(program)
 }
 
@@ -61,8 +63,8 @@ fn card_with_sound(stream: &std::path::Path, ms: u32) -> Option<Vec<u8>> {
     let dir = std::env::temp_dir().join(format!("rnse-aaviewer-{}-{}", std::process::id(), n));
     std::fs::create_dir_all(&dir).unwrap();
     let tool = dir.join("host");
-    let src = root.join("sdbridge/src");
-    let cc = std::process::Command::new("cc").args(["-O2", "-o"]).arg(&tool).arg(root.join("sdbridge/tests/host.c"))
+    let src = root.join("src");
+    let cc = std::process::Command::new("cc").args(["-O2", "-o"]).arg(&tool).arg(root.join("tests/host.c"))
         .arg(src.join("card.c")).arg(src.join("volume.c")).arg(src.join("crc.c")).arg(src.join("aap.c"))
         .arg(src.join("aastream.c")).output().ok()?;
     assert!(cc.status.success(), "{}", String::from_utf8_lossy(&cc.stderr));

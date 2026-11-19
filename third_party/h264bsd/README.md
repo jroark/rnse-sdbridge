@@ -20,4 +20,4 @@ Changed for the SDK (each change is marked "RNS-E SDK" in the source):
 
 Built by `sdk/build.sh` for an example whose `libs` file names it, with
 the C library headers of `sdk/third_party/libc`.  Used by
-`sdk/examples/h264bench`; see `docs/android-auto.md`.
+`h264bench/`; see `docs/android-auto.md`.
