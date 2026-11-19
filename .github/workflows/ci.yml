@@ -15,7 +15,10 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Ubuntu 24.04's GCC 13 is the kit's compiler (rnse-sdk's
+    # tools/sh4-docker): GCC 15 makes h264bench too big for the 192's
+    # loader's place, which leaves it 2 KB with GCC 13.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: The kit (rnse-sdk)
