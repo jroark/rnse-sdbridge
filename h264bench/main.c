@@ -179,17 +179,19 @@ static void show(const u8 *pic, u32 w, u32 h)
     }
 }
 
-/* The last line of a .CRC file: 8 hex digits.  1 when found. */
-static int expected_crc(const char *name264, u32 *crc)
+/* The last line of a .CRC file: 8 hex digits.  1 when found.  The file
+ * is read into `text`, ROOM bytes of free memory (it has a line for
+ * every frame, so a long stream's is longer than a buffer here could
+ * be, and a static one would not fit the loader's place on the 192). */
+static int expected_crc(const char *name264, char *text, u32 room, u32 *crc)
 {
-    static char text[2048];
     char name[12];
     u32 size, i, v = 0;
     int digits = 0;
     for (i = 0; i < 8; i++)
         name[i] = name264[i];
     name[8] = 'C', name[9] = 'R', name[10] = 'C', name[11] = 0;
-    if (sd_load(name, text, sizeof text - 512, &size) || size < 9)
+    if (sd_load(name, text, room - 512, &size) || size < 9)
         return 0;
     /* Back from the end over the line break, then eight digits. */
     i = size;
@@ -420,9 +422,10 @@ static u8 *load(void)
         }
         streams[nstreams].data = at;
         streams[nstreams].size = size;
-        streams[nstreams].check = expected_crc(name, &streams[nstreams].want);
         load_kb += size >> 10;
         at += (size + 512 + 31) & ~31u;
+        /* Read into the memory the next stream will take. */
+        streams[nstreams].check = expected_crc(name, (char *)at, 0x10000, &streams[nstreams].want);
         nstreams++;
     }
     load_ms = millis() - t0;

@@ -38,7 +38,7 @@ fn build_once() -> Option<Vec<u8>> {
         .env("EXTRA_CFLAGS", "-DAA_CRC").output().ok()?;
     if !out.status.success() {
         let text = String::from_utf8_lossy(&out.stderr);
-        assert!(!text.contains("error") || text.contains("not found"), "build: {}", text);
+        assert!(text.contains("gcc: not found") || text.contains("gcc: command not found"), "build: {}", text);
         return None;
     }
     let program = std::fs::read(sdk.join("out/aaviewer-192.bin")).unwrap();
