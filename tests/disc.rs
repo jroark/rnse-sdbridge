@@ -18,7 +18,7 @@ use rnse::sh4::cpu::Stop;
 /// The kit: RNSE_SDK, or rnse's sdk/ beside this directory.
 fn kit() -> std::path::PathBuf {
     std::env::var_os("RNSE_SDK").map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../sdk"))
+        .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../rnse-sdk"))
 }
 
 /// A program of this repository, as build.sh takes it (a path).

@@ -35,7 +35,7 @@ fn build() -> Option<Vec<u8>> {
 fn build_once() -> Option<Vec<u8>> {
     let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     // The kit: RNSE_SDK, or rnse's sdk/ beside this directory.
-    let sdk = std::env::var_os("RNSE_SDK").map(std::path::PathBuf::from).unwrap_or_else(|| here.join("../sdk"));
+    let sdk = std::env::var_os("RNSE_SDK").map(std::path::PathBuf::from).unwrap_or_else(|| here.join("../rnse-sdk"));
     let out = std::process::Command::new("sh").arg(sdk.join("build.sh")).arg("192").arg(here.join("aaviewer"))
         .env("EXTRA_CFLAGS", "-DAA_CRC").output().ok()?;
     if !out.status.success() {

@@ -1,0 +1,34 @@
+# The bridge's card logic on the host (tests/run.sh), the 192's programs
+# built with the kit, and the emulator tests.  The RP2040 firmwares
+# (build.sh: the pico-sdk cloned, pinned) are not built here.  The tests
+# of tests/linkbench.rs and tests/aaviewer.rs need no firmware and run;
+# those of tests/disc.rs need a firmware disc, which is never stored here
+# or in CI, and report success without one.
+name: build
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The kit (rnse-sdk)
+        uses: actions/checkout@v4
+        with:
+          repository: jroark/rnse-sdk
+          ref: v0.1.0
+          path: rnse-sdk
+      - name: SH-4 cross compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc-sh4-linux-gnu binutils-sh4-linux-gnu
+      - name: Host tests
+        run: sh tests/run.sh
+      - name: The 192's programs
+        run: for p in linkbench h264bench aaview aaviewer; do sh rnse-sdk/build.sh 192 ./$p; done
+      - name: Emulator tests
+        run: RNSE_SDK=$GITHUB_WORKSPACE/rnse-sdk cargo test --release
