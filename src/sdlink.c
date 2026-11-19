@@ -17,8 +17,9 @@
  * the phone when its last block has gone out to the 192, so the phone
  * sends no faster than the 192 takes pictures.  When the ring has no
  * room for another frame, the phone's bytes wait in USB until the 192
- * reads (the "paused" count).  Sound is acknowledged and dropped, as
- * SDSTREAM does.
+ * reads (the "paused" count).  The phone's sound goes into the stream
+ * too, its blocks between the pictures' (dropped a message at a time
+ * when the 192 is not reading, or to keep room for the pictures).
  *
  *   core 0  the card's command line and nothing else, from RAM (the
  *           command loop of src/main.c): it has 64 of the host's clocks
@@ -191,6 +192,8 @@ static uint32_t in_dma_sector;
 static int ready_buf = -1;            /* the buffer made and waiting, -1 none */
 static uint32_t ready_sector;
 static volatile uint32_t blocks_sent;
+/* When the 192 last started a read of the window (time_us_32). */
+static volatile uint32_t last_window_read;
 
 /* A read of the window (not of AALINK.BIN's control or input sectors,
  * whose reads are no place in the stream: with the input counted in, on
@@ -267,9 +270,16 @@ static void __not_in_flash_func(on_request)(void)
     if (!kind)
         return;
     reads++;
+    /* A read of AALINK.BIN's input or key sector: its event, here where
+     * the 192 asked for it (not where a sector is made, which may be
+     * ahead of any asking). */
+    if (sector >= link_sector)
+        aastream_request(&stream, sector - link_sector);
     /* A read of the window: the 192 has what came before. */
-    if (window_index(sector, &index))
+    if (window_index(sector, &index)) {
         aastream_consumed(&stream, index);
+        last_window_read = time_us_32();
+    }
     ready_buf = 0;
     ready_sector = sector;
     cur_next = sector + 1;
@@ -318,6 +328,13 @@ static uint32_t ackq[ACKQ];
 static unsigned ack_in, ack_out;
 static int video_open;                /* a video message under way in the stream */
 static uint32_t dropped_bytes;
+/* The 192's pictures read and not yet decoded, as it last said. */
+static uint32_t backlog;
+/* When the oldest acknowledgement became due (ms, | 1; 0 none). */
+static uint32_t ack_since;
+#ifndef ACK_HOLD_MS
+#define ACK_HOLD_MS 250
+#endif
 static uint32_t key_asked_seen;
 
 /* The phone's bytes not yet made into frames: a USB buffer, taken a
@@ -425,6 +442,8 @@ static void handshake(const uint8_t *in, size_t n)
         stream.width = AA_HU_WIDTH;
         stream.height = AA_HU_HEIGHT;
         ack_in = ack_out = 0;
+        backlog = 0;
+        ack_since = 0;
         key_asked_seen = stream.key_asked;
     }
 }
@@ -440,18 +459,18 @@ static void video_frame(uint8_t flags, const uint8_t *p, uint32_t n)
             return;
         p += skip;
         n -= skip;
-        aastream_begin(&stream, type, type == AALINK_PICTURE && aastream_is_key(p, n < 64 ? n : 64));
+        aastream_begin(&stream, 0, type, type == AALINK_PICTURE && aastream_is_key(p, n < 64 ? n : 64));
         video_open = 1;
     }
     if (!video_open)
         return;
     {
-        uint32_t k = aastream_add(&stream, p, n);
+        uint32_t k = aastream_add(&stream, 0, p, n);
         if (k < n)
             dropped_bytes += n - k;   /* should not happen: room was looked at first */
     }
     if (flags & AAP_LAST) {
-        uint32_t last = aastream_end(&stream);
+        uint32_t last = aastream_end(&stream, 0);
         video_open = 0;
         if (ack_in - ack_out < ACKQ)
             ackq[ack_in++ % ACKQ] = last;
@@ -464,12 +483,50 @@ static void video_frame(uint8_t flags, const uint8_t *p, uint32_t n)
     }
 }
 
+/* A sound frame of a media message, decrypted: into the stream as its
+ * channel's (aalink.h's sound types), or dropped, a message at a time,
+ * when the 192 has read nothing for a second (no viewer: it would only
+ * fill the ring) or the ring is nearly full (the pictures come first:
+ * the phone's bytes are held back for them, never for sound). */
+static uint32_t sound_dropped;
+
+static void sound_frame(uint8_t channel, uint8_t flags, const uint8_t *p, uint32_t n)
+{
+    static int open[AASTREAM_CHANNELS];
+    int ch = channel - AA_CH_MEDIA_AUDIO + 1;
+    if (ch < 1 || ch > 3)
+        return;
+    if (flags & AAP_FIRST) {
+        uint16_t id = (uint16_t)(p[0] << 8 | p[1]);
+        uint32_t skip = id == AA_AV_MEDIA ? 2 : 10;  /* the id, and the timestamp */
+        if (n < skip)
+            return;
+        p += skip;
+        n -= skip;
+        open[ch] = time_us_32() - last_window_read < 1000000 && aastream_room(&stream) >= FRAME_ROOM + 8192;
+        if (open[ch])
+            aastream_begin(&stream, ch, AALINK_SOUND_MEDIA + ch - 1, 0);
+        else
+            sound_dropped++;
+    }
+    if (!open[ch])
+        return;
+    if (aastream_add(&stream, ch, p, n) < n)
+        dropped_bytes += n;
+    if (flags & AAP_LAST) {
+        (void)aastream_end(&stream, ch);
+        open[ch] = 0;
+    }
+}
+
 static void session_frame(const struct aap_frame *f, const uint8_t *p, uint32_t n)
 {
     if (aa_hu_media_channel(f->channel) && !(f->flags & AAP_CONTROL) &&
         aa_hu_media_frame(&hu, f->channel, f->flags, p, n)) {
         if (f->channel == AA_CH_VIDEO)
             video_frame(f->flags, p, n);
+        else
+            sound_frame(f->channel, f->flags, p, n);
     } else if (aap_assemble(&msg, f->flags, p, n) == 1) {
         aa_hu_message(&hu, f->channel, f->flags, msg.buf, msg.len);
     }
@@ -576,22 +633,43 @@ static void for_the_192(void)
      * no session, dropped. */
     while (aastream_input_take(&stream, &code)) {
         uint64_t us = time_us_64();
+        if (AALINK_IN_KIND(code) == AALINK_IN_BACKLOG) {
+            backlog = code & 0xff;
+            continue;
+        }
         if (state < AUTHED || state == FAILED)
             continue;
-        if (code & AALINK_IN_KNOB) {
+        if (AALINK_IN_KIND(code) == AALINK_IN_KNOB) {
             aa_hu_rotary(&hu, us, (int8_t)(code & 0xff));
-        } else if (((code & 0xff) >> 1) < AALINK_KEYS) {
+        } else if (AALINK_IN_KIND(code) == 0 && ((code & 0xff) >> 1) < AALINK_KEYS) {
             aa_hu_key(&hu, us, key_codes[(code & 0xff) >> 1], code & 1);
         }
         flush();
     }
     if (state < AUTHED || state == FAILED)
         return;
-    while (ack_out != ack_in && (int32_t)(stream.sent - (ackq[ack_out % ACKQ] + 1)) >= 0) {
+    /* A picture is acknowledged once its last block has gone to the 192,
+     * at once while the 192 is less than two pictures behind with its
+     * decoding, else when it catches up or ACK_HOLD_MS later, whichever
+     * comes first.  The phone waits for the acknowledgement up to some
+     * 300 ms and then drops a frame of its own ("Waiting for ack
+     * timeout, video frame dropped" in a Pixel's log, 2026-11-18): held
+     * within that, it sends no faster than the 192 decodes, 4 a second
+     * at the least. */
+    {
+        uint32_t now = ms();
+        if (ack_out != ack_in && (int32_t)(stream.sent - (ackq[ack_out % ACKQ] + 1)) >= 0 && !ack_since)
+            ack_since = now | 1;
+    }
+    while (ack_out != ack_in && (int32_t)(stream.sent - (ackq[ack_out % ACKQ] + 1)) >= 0 &&
+           (backlog < 2 || ms() - ack_since >= ACK_HOLD_MS)) {
+        ack_since = 0;
         aa_hu_video_ack(&hu);
         ack_out++;
         /* Each sent at once: the session's queue holds only a few. */
         flush();
+        if (ack_out != ack_in && (int32_t)(stream.sent - (ackq[ack_out % ACKQ] + 1)) >= 0)
+            ack_since = ms() | 1;
     }
     if (stream.key_asked != key_asked_seen) {
         key_asked_seen = stream.key_asked;
@@ -606,7 +684,7 @@ static const char *const state_names[] = { "idle", "ready", "ident", "stby", "tr
 static void log_card(void)
 {
     static uint32_t last_blocks, last_messages, last_reads;
-    static uint64_t last_usb, last_decrypt;
+    static uint64_t last_usb, last_decrypt, last_audio;
     uint32_t now = ms(), dt;
     while (log_out != log_in) {
         uint32_t k = log_out % LOGRING;
@@ -623,7 +701,7 @@ static void log_card(void)
         int moved = b != last_blocks;
         printf("card %s, %lu reads, %lu KB/s out (slowest answer %lu of the host's clocks, bad CRC %lu)%s; "
                "phone: %lu pictures/s, USB %lu KB/s, decrypting %lu%%; ring %lu of %u blocks, head %lu, "
-               "%lu acks, %lu paused, %lu key frames asked, %lu inputs%s\n",
+               "%lu acks, %lu paused, %lu key frames asked, %lu inputs; sound %lu KB/s, %lu messages dropped; 192 behind %lu%s\n",
             state_names[card.state], (unsigned long)(reads - last_reads),
             (unsigned long)((b - last_blocks) * 512 / 1024 * 1000 / dt),
             (unsigned long)(slowest * 169 / (mhz * 10) + 1), (unsigned long)card.bad_crc,
@@ -633,12 +711,14 @@ static void log_card(void)
             (unsigned long)((decrypt_us - last_decrypt) / 10 / dt),
             (unsigned long)(stream.head - stream.tail), (unsigned)LINK_BLOCKS, (unsigned long)stream.head,
             (unsigned long)hu.v.acks, (unsigned long)stream.paused, (unsigned long)stream.key_asked,
-            (unsigned long)stream.inputs, dropped_bytes ? " (bytes dropped!)" : "");
+            (unsigned long)stream.inputs, (unsigned long)((hu.audio_bytes - last_audio) * 1000 / 1024 / dt),
+            (unsigned long)sound_dropped, (unsigned long)backlog, dropped_bytes ? " (bytes dropped!)" : "");
         last_blocks = b;
         last_reads = reads;
         last_messages = stream.messages;
         last_usb = usb_bytes;
         last_decrypt = decrypt_us;
+        last_audio = hu.audio_bytes;
         t_stats = now;
         if (state == STREAMING)
             status_set(moved ? ST_OK : ST_WORKING);
@@ -650,8 +730,14 @@ static void phone_gone(void)
     if (state >= HANDSHAKE)
         aa_tls_free(&tls);
     if (video_open) {
-        (void)aastream_end(&stream);
+        (void)aastream_end(&stream, 0);
         video_open = 0;
+    }
+    {
+        int ch;
+        for (ch = 1; ch < AASTREAM_CHANNELS; ch++)
+            if (stream.ch[ch].in_message)
+                (void)aastream_end(&stream, ch);
     }
     stream.state &= (uint16_t)~(AALINK_PHONE | AALINK_VIDEO);
     pend = NULL;

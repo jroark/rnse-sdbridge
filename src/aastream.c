@@ -30,7 +30,12 @@ void aastream_init(struct aastream *s, void *ring, uint32_t blocks)
     s->head = s->tail = s->sent = 0;
     s->fill = 0;
     s->flags = 0;
-    s->in_message = 0;
+    s->open = -1;
+    for (i = 0; i < AASTREAM_CHANNELS; i++) {
+        s->ch[i].in_message = 0;
+        s->ch[i].pending = 0;
+        s->ch[i].type = 0;
+    }
     s->key = AALINK_NONE;
     s->state = 0;
     s->width = s->height = 0;
@@ -70,47 +75,71 @@ static void publish(struct aastream *s, int last)
     put32(b + 16, sum);
     s->flags = 0;
     s->fill = 0;
+    s->open = -1;
     /* The block whole before head says so (one core: the compiler's
      * order is enough). */
     __asm__ volatile("" ::: "memory");
     s->head++;
 }
 
-void aastream_begin(struct aastream *s, int type, int key)
+/* The block at head given to channel ch (the one there before, of
+ * another channel, goes as it is: its message goes on in a later
+ * block).  0, or -1 when the ring has no room for it. */
+static int open_for(struct aastream *s, int ch)
 {
-    if (s->in_message)
-        (void)aastream_end(s);
-    s->in_message = 1;
+    struct aastream_channel *c = &s->ch[ch];
+    if (s->open == ch)
+        return 0;
+    if (s->open >= 0)
+        publish(s, 0);
+    if (s->head - s->tail >= s->blocks)
+        return -1;
+    s->open = ch;
     s->fill = 0;
-    s->flags = (uint16_t)(AALINK_START | (key ? AALINK_KEY : 0) | (type & 15) << 8);
-    s->config_taking = type == AALINK_CONFIG;
-    if (s->config_taking)
-        s->config_len = 0;
-    if (key)
+    s->flags = (uint16_t)(c->pending | (c->type & 15) << 8);
+    /* The key frame's first block: where a decoder may start. */
+    if (c->pending & AALINK_KEY)
         s->key = s->head;
-    if (type == AALINK_PICTURE)
-        s->messages++;
-    s->state |= AALINK_VIDEO;
+    c->pending = 0;
+    return 0;
 }
 
-uint32_t aastream_add(struct aastream *s, const uint8_t *p, uint32_t n)
+void aastream_begin(struct aastream *s, int ch, int type, int key)
+{
+    struct aastream_channel *c = &s->ch[ch];
+    if (c->in_message)
+        (void)aastream_end(s, ch);
+    c->in_message = 1;
+    c->type = (uint8_t)type;
+    c->pending = (uint16_t)(AALINK_START | (key ? AALINK_KEY : 0));
+    if (type == AALINK_CONFIG) {
+        s->config_taking = 1;
+        s->config_len = 0;
+    }
+    if (type == AALINK_PICTURE)
+        s->messages++;
+    if (!AALINK_IS_SOUND(type))
+        s->state |= AALINK_VIDEO;
+}
+
+uint32_t aastream_add(struct aastream *s, int ch, const uint8_t *p, uint32_t n)
 {
     uint32_t taken = 0;
-    if (s->config_taking)
+    if (s->config_taking && s->ch[ch].type == AALINK_CONFIG)
         for (; s->config_len < AALINK_CONFIG_MAX && taken < n; taken++)
             s->config[s->config_len++] = p[taken];
     taken = 0;
     while (taken < n) {
         uint32_t k;
         uint8_t *b;
-        if (s->fill == AALINK_PAYLOAD) {
+        if (s->open == ch && s->fill == AALINK_PAYLOAD) {
             /* Full, and more to come: it goes, unless the ring has no
              * room for the next. */
             if (s->head + 1 - s->tail >= s->blocks)
                 break;
             publish(s, 0);
         }
-        if (s->head - s->tail >= s->blocks)
+        if (open_for(s, ch))
             break;
         b = s->ring[s->head % s->blocks] + AALINK_HEADER;
         k = AALINK_PAYLOAD - s->fill;
@@ -124,16 +153,21 @@ uint32_t aastream_add(struct aastream *s, const uint8_t *p, uint32_t n)
     return taken;
 }
 
-uint32_t aastream_end(struct aastream *s)
+uint32_t aastream_end(struct aastream *s, int ch)
 {
+    struct aastream_channel *c = &s->ch[ch];
     uint32_t seq = s->head;
-    if (!s->in_message)
+    if (!c->in_message)
         return seq - 1;
-    s->in_message = 0;
-    s->config_taking = 0;
-    /* (A message with no bytes is a block too.) */
-    if (s->head - s->tail >= s->blocks)
+    c->in_message = 0;
+    if (c->type == AALINK_CONFIG)
+        s->config_taking = 0;
+    /* Its last block: the one open for it, or (when another channel's
+     * came between, or nothing was added) one of its own with no
+     * bytes. */
+    if (open_for(s, ch))
         return seq - 1; /* no room even for that: the caller looked first */
+    seq = s->head;
     publish(s, 1);
     return seq;
 }
@@ -247,17 +281,22 @@ int aastream_input_take(struct aastream *s, uint16_t *code)
     return 1;
 }
 
+BRIDGE_RAM void aastream_request(struct aastream *s, uint32_t index)
+{
+    if (index >= AALINK_INPUT_FIRST && index < AALINK_FILE_SECTORS)
+        input(s, index - AALINK_INPUT_FIRST);
+    else if (index == AALINK_CTL_KEY)
+        s->key_asked++;
+}
+
 BRIDGE_RAM void aastream_sector(struct aastream *s, uint32_t index, uint32_t *w)
 {
     uint32_t i;
     if (index >= AALINK_INPUT_FIRST && index < AALINK_FILE_SECTORS) {
-        input(s, index - AALINK_INPUT_FIRST);
         state_sector(s, w);
         return;
     }
     if (index < AALINK_CTL_SECTORS) {
-        if (index == AALINK_CTL_KEY)
-            s->key_asked++;
         if (index == AALINK_CTL_STATE || index == AALINK_CTL_KEY) {
             state_sector(s, w);
             return;

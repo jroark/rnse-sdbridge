@@ -49,6 +49,12 @@ fn build_once() -> Option<Vec<u8>> {
 
 /// The bridge's card with the stream in it, from its host test program.
 fn card(stream: &std::path::Path) -> Option<Vec<u8>> {
+    card_with_sound(stream, 0)
+}
+
+/// The same with `ms` milliseconds of a 1 kHz tone as the phone's media
+/// sound, between the pictures and after them.
+fn card_with_sound(stream: &std::path::Path, ms: u32) -> Option<Vec<u8>> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -61,7 +67,12 @@ fn card(stream: &std::path::Path) -> Option<Vec<u8>> {
         .arg(src.join("aastream.c")).output().ok()?;
     assert!(cc.status.success(), "{}", String::from_utf8_lossy(&cc.stderr));
     let image = dir.join("card.img");
-    assert!(std::process::Command::new(&tool).arg(&image).arg(stream).status().unwrap().success());
+    let mut run = std::process::Command::new(&tool);
+    run.arg(&image).arg(stream);
+    if ms > 0 {
+        run.arg(ms.to_string());
+    }
+    assert!(run.status().unwrap().success());
     let card = std::fs::read(&image).unwrap();
     std::fs::remove_dir_all(&dir).ok();
     Some(card)
@@ -210,12 +221,64 @@ fn viewer_sends_the_knob_and_keys() {
     assert_eq!(m.run(500 * ms), Stop::Budget);
     let text = String::from_utf8_lossy(&m.console[at..]).into_owned();
     let what: Vec<u32> = text.lines().filter_map(|l| l.strip_prefix("aaviewer: input "))
-        .map(|c| u32::from_str_radix(c.trim(), 16).unwrap() & 0x1ff).collect();
+        .map(|c| u32::from_str_radix(c.trim(), 16).unwrap() & 0x3ff).collect();
     // The knob's two detents (in one event or two), ENTER down and up,
     // BACK down and up.
-    let knob: i32 = what.iter().filter(|w| *w & 0x100 != 0).map(|w| (*w & 0xff) as u8 as i8 as i32).sum();
-    let keys: Vec<u32> = what.iter().copied().filter(|w| w & 0x100 == 0).collect();
+    // (Kind in bits 9-8: 0 a key, 1 the knob, 2 the backlog, said too.)
+    let knob: i32 = what.iter().filter(|w| *w & 0x300 == 0x100).map(|w| (*w & 0xff) as u8 as i8 as i32).sum();
+    let keys: Vec<u32> = what.iter().copied().filter(|w| w & 0x300 == 0).collect();
     assert_eq!(knob, 2, "{}", text);
     assert_eq!(keys, vec![6 << 1 | 1, 6 << 1, 1 << 1 | 1, 1 << 1], "{}", text);
+}
+
+/// The phone's sound: a 1 kHz tone (48 kHz stereo, the left at half the
+/// right's level) in the stream between the pictures, played by the
+/// other card processor at 44.1 kHz through the amplifier's decoder
+/// input, at its pitch and with no break while it lasts.
+#[test]
+fn viewer_plays_the_phone_s_sound() {
+    use rnse::dev::radio::Radio;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let Some(program) = build() else { return };
+    let Some(card) = card_with_sound(&root.join("tests/data/margin.264"), 3000) else { return };
+    let mut m = start(&program, card);
+    m.speaker = Some(Vec::new());
+    let ms = m.cycles_per_ms();
+    // The volume knob up to the top (the viewer starts at 12 of 30: the
+    // emulated amplifier's gain follows it, 2 dB a step).
+    for _ in 0..30 {
+        if console(&m).contains("BRIDGE IN SLOT") {
+            break;
+        }
+        assert_eq!(m.run(100 * ms), Stop::Budget, "{:?}: {}", m.cpu.fault, console(&m));
+    }
+    assert!(m.panel_knob("volume", 18));
+    for _ in 0..60 {
+        assert_eq!(m.run(100 * ms), Stop::Budget, "{:?}: {}", m.cpu.fault, console(&m));
+    }
+    assert_eq!(m.radio.volume, 30, "the volume knob");
+    let text = console(&m);
+    println!("{}", text);
+    assert!(text.contains("aaviewer: frame 11 "), "{}", text);
+    assert_eq!(m.radio.source, Radio::SOURCE_DECODER, "{}", text);
+    let heard = m.speaker.take().unwrap();
+    let right: Vec<i16> = heard.iter().skip(1).step_by(2).copied().collect();
+    let left: Vec<i16> = heard.iter().step_by(2).copied().collect();
+    // Where the tone is: from its first loud sample, the 2.5 s after.
+    let from = right.iter().position(|v| v.abs() > 8000).unwrap_or_else(|| panic!("no tone heard ({} samples): {}", right.len(), text));
+    let tone = &right[from..(from + 110_250).min(right.len())];
+    assert!(tone.len() >= 88_200, "only {} samples of the tone: {}", tone.len(), text);
+    let pitches: Vec<u32> = tone.chunks(22_050).map(|c| 2 * c.windows(2).filter(|w| w[0] < 0 && w[1] >= 0).count() as u32).collect();
+    for p in &pitches[..pitches.len() - 1] {
+        assert!(p.abs_diff(1000) <= 8, "1 kHz each half second: {:?}", pitches);
+    }
+    // No break: no step between two samples beyond what the sine makes.
+    let peak = tone.iter().map(|v| i32::from(*v).abs()).max().unwrap();
+    let largest = tone.windows(2).map(|w| (i32::from(w[1]) - i32::from(w[0])).abs()).max().unwrap();
+    let slope = (1.2 * 2.0 * std::f64::consts::PI * 1000.0 / 44_100.0 * f64::from(peak)) as i32;
+    assert!(peak > 15_000 && largest <= slope + 2, "a step of {} where the sine of {} has at most {}", largest, peak, slope);
+    // The left at half the right.
+    let lpeak = left[from..from + tone.len()].iter().map(|v| i32::from(*v).abs()).max().unwrap();
+    assert!((lpeak * 2 - peak).abs() < peak / 20, "left {} right {}", lpeak, peak);
 }
 

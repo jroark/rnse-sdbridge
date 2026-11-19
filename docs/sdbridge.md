@@ -797,6 +797,25 @@ pressed briefly BACK, NAV home, MEDIA play/pause, NEXT and PREV the
 tracks, the four keys at the screen's corners up, down, right and left;
 RETURN held, the display key and CD EJECT stay the unit's.
 
+**Sound.**  The phone's sound goes through the same stream: its media
+channel (48 kHz stereo), its navigation voice and its own sounds (16 kHz
+mono), 16-bit samples as the phone sends them.  The phone interleaves
+its channels frame by frame, so the stream does too: every block has
+its message's type, a picture's blocks may have sound's between them,
+START and END mark each message's own first and last.  The bridge drops
+sound a message at a time when the 192 has read nothing for a second or
+the ring is nearly full (the pictures are held back for, sound is not).
+On the 192 each source has a FIFO; the other card processor than the
+bridge's plays a mix of them at 44.1 kHz (`src/pcm.c`'s ring of blocks,
+fed by DMA, which plays on while a picture is decoded), each source
+resampled to it, its step nudged by how full its FIFO is (some 200 ms
+ahead, at most half a per cent of pitch), so that the phone's clock and
+the converter's do not drift apart.  The viewer decodes one picture and
+then reads again, so that the sound keeps coming; the volume knob sets
+the amplifier's volume.  `tests/aaviewer.rs` plays a 1 kHz tone laid in
+between the pictures and checks its pitch, its levels and that it has
+no break; `tests/disc.rs` hears it through the stock software's path.
+
 **On the 192.**  `AAVIEW.BIN` (`sdk/examples/aaview`, in the SD loader's
 menu) loads `AAVIEWER.IMG` (`sdk/out/aaviewer-192.bin`, linked at
 0x8c010000 by its file `place`: the decoder makes it too big for the

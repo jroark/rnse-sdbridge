@@ -60,6 +60,14 @@
 #define AA_HU_FPS 2
 #endif
 
+/* The sound messages a phone may send ahead of the acknowledgements: a
+ * Pixel waits for each with 1 ("MediaSourceFlowController out of
+ * permits" in its log, 2026-11-18), and an acknowledgement held up by
+ * the bridge then stops its sound. */
+#ifndef AA_HU_SOUND_UNACKED
+#define AA_HU_SOUND_UNACKED 4
+#endif
+
 /* A message for the phone: to be encrypted and sent as one frame on
  * `channel` with `flags` (AAP_CONTROL or 0). */
 #define AA_HU_MSG_MAX 512
