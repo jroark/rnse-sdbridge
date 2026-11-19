@@ -1,6 +1,6 @@
 /* What aaview (sdk/examples/aaview) leaves for the viewer it starts
  * (sdk/examples/aaviewer), at a fixed address below it, as quakeboot
- * does for Quake (docs/quake.md, "Memory"). */
+ * does for Quake (ports/docs/quake.md, "Memory"). */
 #ifndef AA_HANDOFF_H
 #define AA_HANDOFF_H
 
