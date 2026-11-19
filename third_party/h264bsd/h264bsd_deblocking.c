@@ -634,6 +634,9 @@ void h264bsdFilterPicture(
         {
             mbCol = 0;
             mbRow++;
+            /* RNS-E SDK: h264bsdIdle (h264bsd_util.h). */
+            if (h264bsdIdle)
+                h264bsdIdle();
         }
     }
 
@@ -1873,6 +1876,9 @@ void h264bsdFilterPicture(
         {
             mbCol = 0;
             mbRow++;
+            /* RNS-E SDK: h264bsdIdle (h264bsd_util.h). */
+            if (h264bsdIdle)
+                h264bsdIdle();
         }
     }
 

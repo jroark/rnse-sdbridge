@@ -609,6 +609,38 @@ static void test_aastream(void)
     CHECK(st.key_asked == 0);
     link_sector(&st, AALINK_CTL_KEY, b);
     CHECK(st.key_asked == 1 && g32(b) == AALINK_CTL_MAGIC);
+    /* Which sectors are the window's: not the control sectors, not the
+     * input sectors after it (a knob's read is no place in the stream). */
+    {
+        uint32_t wi = 12345;
+        CHECK(!aastream_in_window(0, &wi) && !aastream_in_window(AALINK_CTL_SECTORS - 1, &wi));
+        CHECK(aastream_in_window(AALINK_CTL_SECTORS, &wi) && wi == 0);
+        CHECK(aastream_in_window(AALINK_INPUT_FIRST - 1, &wi) && wi == AALINK_WINDOW - 1);
+        CHECK(!aastream_in_window(AALINK_INPUT_FIRST, &wi) && !aastream_in_window(AALINK_FILE_SECTORS - 1, &wi));
+    }
+    /* Input: a read of an input sector is an event, once; the same read
+     * again (same sequence number) is not; the next one is. */
+    {
+        uint16_t code;
+        uint32_t base = AALINK_INPUT_FIRST;
+        CHECK(!aastream_input_take(&st, &code));
+        link_sector(&st, base + AALINK_IN_CODE(1, AALINK_KEY_ENTER << 1 | 1), b);
+        CHECK(g32(b) == AALINK_CTL_MAGIC);
+        link_sector(&st, base + AALINK_IN_CODE(1, AALINK_KEY_ENTER << 1 | 1), b);
+        link_sector(&st, base + AALINK_IN_CODE(2, AALINK_KEY_ENTER << 1), b);
+        link_sector(&st, base + AALINK_IN_CODE(3, AALINK_IN_KNOB | (uint8_t)-3), b);
+        CHECK(g32(b + AALINK_CTL_O_INPUTS) == 3);
+        CHECK(aastream_input_take(&st, &code) && code == AALINK_IN_CODE(1, AALINK_KEY_ENTER << 1 | 1));
+        CHECK(aastream_input_take(&st, &code) && code == AALINK_IN_CODE(2, AALINK_KEY_ENTER << 1));
+        CHECK(aastream_input_take(&st, &code) && (code & AALINK_IN_KNOB) && (int8_t)(code & 0xff) == -3);
+        CHECK(!aastream_input_take(&st, &code));
+        /* More than the queue holds: the rest dropped, nothing broken. */
+        for (i = 0; i < 40; i++)
+            link_sector(&st, base + AALINK_IN_CODE(i, AALINK_IN_KNOB | 1), b);
+        for (i = 0; aastream_input_take(&st, &code); i++)
+            ;
+        CHECK(i == AASTREAM_INPUTS);
+    }
     /* Gone out: one past the last block sent whole. */
     aastream_went_out(&st, 4);
     aastream_went_out(&st, 2);

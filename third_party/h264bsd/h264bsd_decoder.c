@@ -60,6 +60,8 @@
  * h264bsdFilterTime, in the timer's units. */
 u32 (*h264bsdTimer)(void);
 u32 h264bsdFilterTime;
+/* RNS-E SDK: h264bsd_util.h. */
+void (*h264bsdIdle)(void);
 
 /*------------------------------------------------------------------------------
     2. External compiler flags

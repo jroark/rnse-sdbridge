@@ -192,12 +192,14 @@ static int ready_buf = -1;            /* the buffer made and waiting, -1 none */
 static uint32_t ready_sector;
 static volatile uint32_t blocks_sent;
 
+/* A read of the window (not of AALINK.BIN's control or input sectors,
+ * whose reads are no place in the stream: with the input counted in, on
+ * a unit, 2026-11-18, a turn of the knob let go of pictures not yet read
+ * and set acknowledgements free; the 192 then asked for a key frame and
+ * the phone's video began anew). */
 static int __not_in_flash_func(window_index)(uint32_t sector, uint32_t *index)
 {
-    if (sector < link_sector + AALINK_CTL_SECTORS || sector >= link_sector + AALINK_FILE_SECTORS)
-        return 0;
-    *index = sector - link_sector - AALINK_CTL_SECTORS;
-    return 1;
+    return sector >= link_sector && aastream_in_window(sector - link_sector, index);
 }
 
 static void __not_in_flash_func(make)(int b, uint32_t sector)
@@ -568,11 +570,28 @@ static void phone_bytes(void)
  * asked for one. */
 static void for_the_192(void)
 {
+    static const uint32_t key_codes[AALINK_KEYS] = AALINK_KEY_CODES;
+    uint16_t code;
+    /* The 192's keys and knob (aalink.h, "Input"), to the phone; with
+     * no session, dropped. */
+    while (aastream_input_take(&stream, &code)) {
+        uint64_t us = time_us_64();
+        if (state < AUTHED || state == FAILED)
+            continue;
+        if (code & AALINK_IN_KNOB) {
+            aa_hu_rotary(&hu, us, (int8_t)(code & 0xff));
+        } else if (((code & 0xff) >> 1) < AALINK_KEYS) {
+            aa_hu_key(&hu, us, key_codes[(code & 0xff) >> 1], code & 1);
+        }
+        flush();
+    }
     if (state < AUTHED || state == FAILED)
         return;
     while (ack_out != ack_in && (int32_t)(stream.sent - (ackq[ack_out % ACKQ] + 1)) >= 0) {
         aa_hu_video_ack(&hu);
         ack_out++;
+        /* Each sent at once: the session's queue holds only a few. */
+        flush();
     }
     if (stream.key_asked != key_asked_seen) {
         key_asked_seen = stream.key_asked;
@@ -604,7 +623,7 @@ static void log_card(void)
         int moved = b != last_blocks;
         printf("card %s, %lu reads, %lu KB/s out (slowest answer %lu of the host's clocks, bad CRC %lu)%s; "
                "phone: %lu pictures/s, USB %lu KB/s, decrypting %lu%%; ring %lu of %u blocks, head %lu, "
-               "%lu acks, %lu paused, %lu key frames asked%s\n",
+               "%lu acks, %lu paused, %lu key frames asked, %lu inputs%s\n",
             state_names[card.state], (unsigned long)(reads - last_reads),
             (unsigned long)((b - last_blocks) * 512 / 1024 * 1000 / dt),
             (unsigned long)(slowest * 169 / (mhz * 10) + 1), (unsigned long)card.bad_crc,
@@ -614,7 +633,7 @@ static void log_card(void)
             (unsigned long)((decrypt_us - last_decrypt) / 10 / dt),
             (unsigned long)(stream.head - stream.tail), (unsigned)LINK_BLOCKS, (unsigned long)stream.head,
             (unsigned long)hu.v.acks, (unsigned long)stream.paused, (unsigned long)stream.key_asked,
-            dropped_bytes ? " (bytes dropped!)" : "");
+            (unsigned long)stream.inputs, dropped_bytes ? " (bytes dropped!)" : "");
         last_blocks = b;
         last_reads = reads;
         last_messages = stream.messages;

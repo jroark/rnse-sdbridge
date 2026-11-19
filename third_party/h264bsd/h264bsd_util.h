@@ -178,5 +178,12 @@ void h264bsdSetCurrImageMbPointers(image_t *image, u32 mbNum);
 i32 abs(i32 a);
 i32 clip(i32 x, i32 y, i32 z);
 
+/* RNS-E SDK: when set, called every few milliseconds while a picture is
+ * decoded (every 64 macroblocks, and every row of the loop filter), for
+ * a program that has to keep serving something else meanwhile (the
+ * faceplate's serial line, whose few bytes of buffer would overflow
+ * during a whole frame). */
+extern void (*h264bsdIdle)(void);
+
 #endif /* #ifdef H264SWDEC_UTIL_H */
 

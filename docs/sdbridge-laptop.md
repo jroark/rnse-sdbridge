@@ -132,8 +132,9 @@ screen /dev/ttyUSB0 115200                  # Linux
 * The whole path (`SDLINK.UF2` and `aaviewer`): written 2026-11-18,
   tested on the host and the emulated 192 (a recorded stream decoded
   bit for bit, through the stock software and the SD loader).  **Works
-  on the unit** (2026-11-18): Maps from the phone on the 192's screen,
-  its colours off; frames a second not yet measured.
+  on the unit** (2026-11-18): Maps from the phone on the 192's screen
+  at 10-13 pictures a second, the knob and keys driving it; no sound
+  yet.
 
 ## What to do next
 

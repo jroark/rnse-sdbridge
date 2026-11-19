@@ -13,6 +13,10 @@ Changed for the SDK (each change is marked "RNS-E SDK" in the source):
   of `memcpy` for each row; `h264bsdFastCopy = 0` gives the original.
 - `h264bsd_decoder.c`, `.h`: an optional timer (`h264bsdTimer`) that adds
   up the loop filter's time in `h264bsdFilterTime`.
+- `h264bsd_util.h`, `h264bsd_slice_data.c`, `h264bsd_deblocking.c`: an
+  optional `h264bsdIdle`, called every 64 macroblocks and every row of
+  the loop filter, so that a program keeps serving the faceplate while a
+  picture is decoded (`sdk/examples/aaviewer`).
 
 Built by `sdk/build.sh` for an example whose `libs` file names it, with
 the C library headers of `sdk/third_party/libc`.  Used by

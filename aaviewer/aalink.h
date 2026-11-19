@@ -36,7 +36,9 @@
 #define AALINK_NAME "AALINK  BIN"            /* as a directory entry has it */
 #define AALINK_CTL_SECTORS 8
 #define AALINK_WINDOW 65536u                 /* sectors: 32 MiB */
-#define AALINK_FILE_SECTORS (AALINK_CTL_SECTORS + AALINK_WINDOW)
+#define AALINK_INPUT_SECTORS 4096u           /* after the window: see "Input" below */
+#define AALINK_INPUT_FIRST (AALINK_CTL_SECTORS + AALINK_WINDOW)
+#define AALINK_FILE_SECTORS (AALINK_INPUT_FIRST + AALINK_INPUT_SECTORS)
 
 /* The control sectors: 0 how things stand (below); 1 the same, and
  * reading it asks the phone for a new key frame (a 192 that starts while
@@ -71,6 +73,33 @@
 #define AALINK_CTL_CONFIG 64
 #define AALINK_CONFIG_MAX (512 - AALINK_CTL_CONFIG)
 
+/* Input, the 192's keys and knob for the phone: reading sector
+ * AALINK_INPUT_FIRST + code (one CMD17) is an event, whose code has a
+ * sequence number in bits 11-9 (the next of each event, so that a read
+ * made again is not taken twice), the kind in bit 8, and 8 bits of what:
+ *
+ *   key    (bit 8 clear): an index of aalink_keys << 1, | 1 pressed
+ *   knob   (bit 8 set): the rotary controller's detents, signed
+ *
+ * The sector reads as the state sector.  The bridge passes each to the
+ * phone as Android Auto's input event; the codes are those the head
+ * unit declares (src/aa_hu.c), as aasdk's ButtonCode has them. */
+#define AALINK_IN_KNOB 0x100
+#define AALINK_IN_CODE(seq, what) ((((seq) & 7u) << 9) | ((what) & 0x1ffu))
+#define AALINK_KEY_HOME 0
+#define AALINK_KEY_BACK 1
+#define AALINK_KEY_UP 2
+#define AALINK_KEY_DOWN 3
+#define AALINK_KEY_LEFT 4
+#define AALINK_KEY_RIGHT 5
+#define AALINK_KEY_ENTER 6
+#define AALINK_KEY_PLAY 7
+#define AALINK_KEY_NEXT 8
+#define AALINK_KEY_PREV 9
+#define AALINK_KEYS 10
+#define AALINK_KEY_CODES { 0x03, 0x04, 0x13, 0x14, 0x15, 0x16, 0x17, 0x55, 0x57, 0x58 }
+#define AALINK_ROTARY 65536u                 /* the rotary controller's scan code */
+
 /* Offsets in the state sector. */
 #define AALINK_CTL_O_MAGIC 0
 #define AALINK_CTL_O_VERSION 4
@@ -84,5 +113,6 @@
 #define AALINK_CTL_O_MESSAGES 28             /* pictures the phone has sent */
 #define AALINK_CTL_O_KEY_ASKED 32            /* key frames asked for (AALINK_CTL_KEY) */
 #define AALINK_CTL_O_PAUSED 36               /* times the phone was held back for room */
+#define AALINK_CTL_O_INPUTS 40               /* input events taken */
 
 #endif

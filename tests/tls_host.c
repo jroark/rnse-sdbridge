@@ -477,6 +477,34 @@ static void session(void)
     CHECK(session_hu.nout == 1 && session_hu.v.acks == 4);
     session_hu.nout = 0;
     session_hu.defer_video_acks = 0;
+    /* Input for the phone: a key and the rotary controller, as aasdk's
+     * InputEventIndication (timestamp 1, buttons 4, relative input 6). */
+    {
+        struct aap_pb_field f, g, e;
+        uint32_t at = 2, at2, at3;
+        aa_hu_key(&session_hu, 1234567, 0x17, 1);
+        CHECK(session_hu.nout == 1 && session_hu.out[0].channel == AA_CH_INPUT);
+        CHECK(session_hu.out[0].data[0] == 0x80 && session_hu.out[0].data[1] == 0x01);
+        CHECK(aap_pb_next(session_hu.out[0].data, session_hu.out[0].len, &at, &f) == 1 && f.number == 1 && f.value == 1234567);
+        CHECK(aap_pb_next(session_hu.out[0].data, session_hu.out[0].len, &at, &f) == 1 && f.number == 4 && f.type == 2);
+        at2 = 0;
+        CHECK(aap_pb_next(f.bytes, f.len, &at2, &g) == 1 && g.number == 1 && g.type == 2);
+        at3 = 0;
+        CHECK(aap_pb_next(g.bytes, g.len, &at3, &e) == 1 && e.number == 1 && e.value == 0x17);
+        CHECK(aap_pb_next(g.bytes, g.len, &at3, &e) == 1 && e.number == 2 && e.value == 1);
+        session_hu.nout = 0;
+        aa_hu_rotary(&session_hu, 99, -2);
+        at = 2;
+        CHECK(aap_pb_next(session_hu.out[0].data, session_hu.out[0].len, &at, &f) == 1 && f.number == 1 && f.value == 99);
+        CHECK(aap_pb_next(session_hu.out[0].data, session_hu.out[0].len, &at, &f) == 1 && f.number == 6 && f.type == 2);
+        at2 = 0;
+        CHECK(aap_pb_next(f.bytes, f.len, &at2, &g) == 1 && g.number == 1);
+        at3 = 0;
+        CHECK(aap_pb_next(g.bytes, g.len, &at3, &e) == 1 && e.number == 1 && e.value == 65536);
+        CHECK(aap_pb_next(g.bytes, g.len, &at3, &e) == 1 && e.number == 2 && (int32_t)e.value == -2);
+        CHECK(session_hu.inputs == 2);
+        session_hu.nout = 0;
+    }
     /* A key frame asked for: the focus away and back, in that order. */
     aa_hu_ask_key_frame(&session_hu);
     CHECK(session_hu.nout == 2 && session_hu.out[0].channel == AA_CH_VIDEO && session_hu.out[1].channel == AA_CH_VIDEO);

@@ -93,6 +93,7 @@ struct aa_hu {
     int session;           /* the video session, from its start indication */
     int video_started;
     uint32_t pings;
+    uint32_t inputs;           /* input events sent */
     struct aa_hu_video v;
     /* Each channel's media message whose frames are coming, and its
      * session. */
@@ -136,6 +137,14 @@ void aa_hu_video_ack(struct aa_hu *h);
  * screen for a while: a guess at what makes a phone send one, not
  * measured). */
 void aa_hu_ask_key_frame(struct aa_hu *h);
+
+/* Input for the phone, into out: a key (a code the input channel
+ * declares, as aasdk's ButtonCode: 3 home, 4 back, 0x13-0x16 up, down,
+ * left, right, 0x17 enter, 0x55 play/pause, 0x57 next, 0x58 previous)
+ * pressed or let go, or the rotary controller turned by delta detents.
+ * us: a timestamp in microseconds. */
+void aa_hu_key(struct aa_hu *h, uint64_t us, uint32_t code, int pressed);
+void aa_hu_rotary(struct aa_hu *h, uint64_t us, int32_t delta);
 
 /* The service discovery response, id first: its length, or -1. */
 int aa_hu_discovery(uint8_t *out, uint32_t cap);

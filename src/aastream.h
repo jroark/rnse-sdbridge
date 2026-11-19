@@ -31,6 +31,12 @@ struct aastream {
     uint32_t config_len;
     int config_taking;            /* the message under way is a configuration */
     uint32_t messages, key_asked, paused;
+    /* Input from the 192 (aalink.h, "Input"), for the session to take. */
+#define AASTREAM_INPUTS 16
+    uint16_t input[AASTREAM_INPUTS];
+    volatile uint32_t input_in, input_out;
+    int input_seq;                /* the last event's code, -1 none */
+    uint32_t inputs;
 };
 
 void aastream_init(struct aastream *s, void *ring, uint32_t blocks);
@@ -51,12 +57,18 @@ int aastream_is_key(const uint8_t *p, uint32_t n);
  * 128 words, each its four bytes most significant first.  Reading
  * AALINK_CTL_KEY counts a key frame asked for. */
 void aastream_sector(struct aastream *s, uint32_t index, uint32_t *words);
+/* Whether sector `index` of AALINK.BIN is one of the window's (not a
+ * control sector before it nor an input sector after it), and which. */
+int aastream_in_window(uint32_t index, uint32_t *window_index);
 /* The block a window sector holds: the seq of that sector nearest the
  * blocks kept. */
 uint32_t aastream_seq(const struct aastream *s, uint32_t window_index);
 /* The 192 has started a read at window sector `window_index`: the
  * blocks before it are let go. */
 void aastream_consumed(struct aastream *s, uint32_t window_index);
+/* An input event the 192 sent, for the session: 1 with its code
+ * (aalink.h), 0 none. */
+int aastream_input_take(struct aastream *s, uint16_t *code);
 /* Block seq has gone out whole (for the acknowledgements). */
 void aastream_went_out(struct aastream *s, uint32_t seq);
 

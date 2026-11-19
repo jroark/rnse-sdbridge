@@ -37,6 +37,9 @@ void aastream_init(struct aastream *s, void *ring, uint32_t blocks)
     s->config_len = 0;
     s->config_taking = 0;
     s->messages = s->key_asked = s->paused = 0;
+    s->input_in = s->input_out = 0;
+    s->input_seq = -1;
+    s->inputs = 0;
 }
 
 uint32_t aastream_room(const struct aastream *s)
@@ -148,6 +151,14 @@ int aastream_is_key(const uint8_t *p, uint32_t n)
     return 0;
 }
 
+BRIDGE_RAM int aastream_in_window(uint32_t index, uint32_t *window_index)
+{
+    if (index < AALINK_CTL_SECTORS || index >= AALINK_INPUT_FIRST)
+        return 0;
+    *window_index = index - AALINK_CTL_SECTORS;
+    return 1;
+}
+
 BRIDGE_RAM uint32_t aastream_seq(const struct aastream *s, uint32_t window_index)
 {
     uint32_t tail = s->tail;
@@ -203,14 +214,47 @@ BRIDGE_RAM static void state_sector(struct aastream *s, uint32_t *w)
     put32(b + AALINK_CTL_O_MESSAGES, s->messages);
     put32(b + AALINK_CTL_O_KEY_ASKED, s->key_asked);
     put32(b + AALINK_CTL_O_PAUSED, s->paused);
+    put32(b + AALINK_CTL_O_INPUTS, s->inputs);
     for (i = 0; i < n; i++)
         b[AALINK_CTL_CONFIG + i] = s->config[i];
     words_of(b, w);
 }
 
+/* A read of the input sectors: the event, unless it is the last again
+ * (the same code, sequence number and all: a read made again). */
+BRIDGE_RAM static void input(struct aastream *s, uint32_t code)
+{
+    uint32_t n = s->input_in;
+    if ((int)code == s->input_seq)
+        return;
+    s->input_seq = (int)code;
+    if (n - s->input_out >= AASTREAM_INPUTS)
+        return;
+    s->input[n % AASTREAM_INPUTS] = (uint16_t)code;
+    __asm__ volatile("" ::: "memory");
+    s->input_in = n + 1;
+    s->inputs++;
+}
+
+int aastream_input_take(struct aastream *s, uint16_t *code)
+{
+    uint32_t n = s->input_out;
+    if (n == s->input_in)
+        return 0;
+    *code = s->input[n % AASTREAM_INPUTS];
+    __asm__ volatile("" ::: "memory");
+    s->input_out = n + 1;
+    return 1;
+}
+
 BRIDGE_RAM void aastream_sector(struct aastream *s, uint32_t index, uint32_t *w)
 {
     uint32_t i;
+    if (index >= AALINK_INPUT_FIRST && index < AALINK_FILE_SECTORS) {
+        input(s, index - AALINK_INPUT_FIRST);
+        state_sector(s, w);
+        return;
+    }
     if (index < AALINK_CTL_SECTORS) {
         if (index == AALINK_CTL_KEY)
             s->key_asked++;

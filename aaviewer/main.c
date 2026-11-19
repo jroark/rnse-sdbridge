@@ -66,6 +66,15 @@ static const u32 ports[2] = { 0xb5000002, 0xb500004a };
 #define MSG_ROOM (1u << 20)          /* the messages read and not yet decoded */
 #define DONE_MAX 64
 
+/* The debug console's lines while the video runs (the counts every two
+ * seconds, each input event): for the emulator's tests, built with
+ * -DAA_CRC, only.  The port runs at 9600 bit/s and console_puts waits
+ * for it: on a unit a report line held everything up for some 130 ms,
+ * an input event's line for some 28 (2026-11-18). */
+#if defined(AA_CRC) && !defined(AA_TRACE)
+#define AA_TRACE
+#endif
+
 #ifndef BURST_PACE
 #define BURST_PACE 20                /* as linkbench: see block_in there */
 #endif
@@ -137,36 +146,93 @@ static void pause(u32 ms)
 
 /* ---- colour --------------------------------------------------------- */
 
-static u8 clamp_table[1024];
-#define CLAMP(v) clamp_table[(v) + 384]
 /* Colour by 5 bits of luma and 4 each of the two chroma samples, one
- * look-up a pixel (as examples/h264bench). */
+ * look-up a pixel (as examples/h264bench), into a palette of a 6x6x6
+ * cube and 40 greys, each entry of the table the palette's nearest
+ * colour.  The chroma steps are centred on 128 (each covers c - 8 to
+ * c + 7 of 16 c), so that grey stays grey: with the middles of 16-wide
+ * steps from 0 (h264bench's table) every grey came out 8 above 128 in
+ * both, red and blue up and green down, the lilac and pink of the first
+ * picture on a unit (2026-11-18).  The conversion is the stream's own:
+ * its range (studio or full) and matrix (BT.601 or BT.709), from its
+ * sequence parameter set when it has them, else BT.601 studio range. */
 static u8 colour[32 * 16 * 16];
-#define PIXEL(y, cb, cr) colour[((y) >> 3) << 8 | ((cb) >> 4) << 4 | (cr) >> 4]
+#define CHROMA(c) ((c) >= 248 ? 15 : ((c) + 8) >> 4)
+#define PIXEL(y, cb, cr) colour[((y) >> 3) << 8 | CHROMA(cb) << 4 | CHROMA(cr)]
+#define GREYS 40
+static u8 grey_level[GREYS];
+static int colour_range = -1, colour_matrix = -1;
 
-static void tables(void)
+static u32 clamp255(s32 v)
 {
+    return v < 0 ? 0 : v > 255 ? 255 : (u32)v;
+}
+
+/* The palette's nearest colour to r, g, b: the cube's (each level
+ * rounded) or a grey's, whichever is nearer, weighted 2-4-3. */
+static u8 nearest(u32 r, u32 g, u32 b)
+{
+    u32 cr = (r * 5 + 127) / 255, cg = (g * 5 + 127) / 255, cb = (b * 5 + 127) / 255;
+    s32 dr = (s32)r - (s32)(cr * 51), dg = (s32)g - (s32)(cg * 51), db = (s32)b - (s32)(cb * 51);
+    u32 best = (u32)(2 * dr * dr + 4 * dg * dg + 3 * db * db);
+    u8 pick = (u8)(cr * 36 + cg * 6 + cb);
+    /* The grey nearest the weighted lightness (they are evenly spaced),
+     * then its distance. */
+    u32 l = (2 * r + 4 * g + 3 * b) / 9, at = (l * (GREYS - 1) + 127) / 255;
+    dr = (s32)r - grey_level[at];
+    dg = (s32)g - grey_level[at];
+    db = (s32)b - grey_level[at];
+    if ((u32)(2 * dr * dr + 4 * dg * dg + 3 * db * db) < best)
+        pick = (u8)(216 + at);
+    return pick;
+}
+
+/* The table for a stream's range (1 full) and matrix (1 BT.709, else
+ * BT.601), in 1/256. */
+static void colour_table(int range, int matrix)
+{
+    s32 kr, kgb, kgr, kb, ky, off;
     u32 i;
-    s32 k;
-    for (k = -384; k < 640; k++)
-        clamp_table[k + 384] = (u8)(k < 0 ? 0 : k > 255 ? 255 : k);
-    /* ITU-R BT.601, studio range, in 1/256, for the middle of each step. */
+    if (range == colour_range && matrix == colour_matrix)
+        return;
+    colour_range = range;
+    colour_matrix = matrix;
+    if (matrix == 1) {          /* BT.709 */
+        kr = range ? 403 : 459, kgb = range ? 48 : 55, kgr = range ? 120 : 136, kb = range ? 475 : 541;
+    } else {                    /* BT.601 */
+        kr = range ? 359 : 409, kgb = range ? 88 : 100, kgr = range ? 183 : 208, kb = range ? 454 : 516;
+    }
+    ky = range ? 256 : 298;
+    off = range ? 0 : 16;
     for (i = 0; i < sizeof colour; i++) {
-        s32 y = (s32)(i >> 8) * 8 + 4, cb = (s32)((i >> 4) & 15) * 16 + 8, cr = (s32)(i & 15) * 16 + 8;
-        s32 l = (y - 16) * 298 >> 8;
-        u32 r = CLAMP(l + ((409 * (cr - 128)) >> 8));
-        u32 g = CLAMP(l - ((208 * (cr - 128)) >> 8) - ((100 * (cb - 128)) >> 8));
-        u32 b = CLAMP(l + ((516 * (cb - 128)) >> 8));
-        colour[i] = (u8)((r & 0xe0) | (g & 0xe0) >> 3 | b >> 6);
+        s32 y = (s32)(i >> 8) * 8 + 4, cb = (s32)((i >> 4) & 15) * 16 - 128, cr = (s32)(i & 15) * 16 - 128;
+        s32 l = (y - off) * ky;
+        colour[i] = nearest(clamp255((l + kr * cr) >> 8), clamp255((l - kgb * cb - kgr * cr) >> 8), clamp255((l + kb * cb) >> 8));
     }
 }
 
+static void tables(void)
+{
+    u32 k;
+    for (k = 0; k < GREYS; k++)
+        grey_level[k] = (u8)(k * 255 / (GREYS - 1));
+    colour_table(0, 2);
+}
+
+/* The cube, then the greys (the last white, as the text before the
+ * picture has it). */
 static void palette(void)
 {
     u32 i;
-    for (i = 0; i < 256; i++)
-        screen_palette((int)i, (u8)((i >> 5) * 255 / 7), (u8)(((i >> 2) & 7) * 255 / 7), (u8)((i & 3) * 255 / 3));
+    for (i = 0; i < 216; i++)
+        screen_palette((int)i, (u8)(i / 36 * 51), (u8)(i / 6 % 6 * 51), (u8)(i % 6 * 51));
+    for (i = 0; i < GREYS; i++)
+        screen_palette((int)(216 + i), grey_level[i], grey_level[i], grey_level[i]);
 }
+
+/* Called every 24 lines (main sets it: the faceplate, and the knob's
+ * events). */
+static void (*show_idle)(void) = panel_service;
 
 /* Every other pixel of every other line, as examples/h264bench shows. */
 static void show(const u8 *pic, u32 w, u32 h)
@@ -175,6 +241,9 @@ static void show(const u8 *pic, u32 w, u32 h)
     u32 x, y, lines = (u32)screen_height < h / 2 ? (u32)screen_height : h / 2, cols = w / 2 > 400 ? 400 : w / 2;
     for (y = 0; y < lines; y++) {
         const u8 *py = pic + 2 * y * w, *pb = cb + y * (w / 2), *pr = cr + y * (w / 2);
+        /* The faceplate every 24 lines, some 4 ms (see main). */
+        if (!(y % 24))
+            show_idle();
         volatile u32 *out = (volatile u32 *)(VRAM + SURFACE + y * STRIDE);
         for (x = 0; x < cols; x += 4) {
             *out++ = (u32)PIXEL(py[0], pb[0], pr[0]) | (u32)PIXEL(py[2], pb[1], pr[1]) << 8 |
@@ -510,7 +579,7 @@ static void leave(void)
 /* What a slot said, for the screen: SLOT n: then the words. */
 static void slot_says(int s, const char *what, int r)
 {
-    char text[64], *q = put_str(text, "SLOT ");
+    char text[96], *q = put_str(text, "SLOT ");
     q = put_dec(q, (u32)s + 1);
     q = put_str(q, ": ");
     q = put_str(q, what);
@@ -684,6 +753,79 @@ static int read_blocks(u32 want)
     return took;
 }
 
+/* ---- the keys and the knob, for the phone --------------------------- */
+
+/* The unit's keys as Android Auto's (aalink.h, "Input"): the select knob
+ * is the rotary controller, its push ENTER; RETURN pressed briefly is
+ * BACK (held, the way back to the loader, as everywhere); NAV home, MEDIA
+ * play/pause, NEXT and PREV the tracks, the four keys at the screen's
+ * corners up, down, right and left.  The display key and CD EJECT stay
+ * the unit's (panel_service). */
+static const struct {
+    u8 key, aa;
+} key_map[] = {
+    { KEY_SELECT, AALINK_KEY_ENTER }, { KEY_NAV, AALINK_KEY_HOME }, { KEY_MEDIA, AALINK_KEY_PLAY },
+    { KEY_NEXT, AALINK_KEY_NEXT }, { KEY_PREV, AALINK_KEY_PREV },
+    { KEY_SOFT_TL, AALINK_KEY_UP }, { KEY_SOFT_BL, AALINK_KEY_DOWN },
+    { KEY_SOFT_TR, AALINK_KEY_RIGHT }, { KEY_SOFT_BR, AALINK_KEY_LEFT },
+};
+#define KEY_MAPS (sizeof key_map / sizeof key_map[0])
+static u8 key_was[KEY_MAPS];
+static u32 input_seq, inputs_sent;
+
+/* An event to the bridge: the read of its input sector. */
+static void send_input(u32 what)
+{
+    static u8 b[512];
+    input_seq++;
+    if (read_one(link_first + AALINK_INPUT_FIRST + AALINK_IN_CODE(input_seq, what), b) == 0)
+        inputs_sent++;
+#ifdef AA_TRACE
+    console_puts("aaviewer: input ");
+    console_hex(AALINK_IN_CODE(input_seq, what));
+    console_puts("\n");
+#endif
+}
+
+static void inputs(void)
+{
+    u32 i;
+    int d = panel_knob(KNOB_SELECT);
+    while (d) {
+        int k = d > 100 ? 100 : d < -100 ? -100 : d;
+        send_input(AALINK_IN_KNOB | ((u32)k & 0xff));
+        d -= k;
+    }
+    for (i = 0; i < KEY_MAPS; i++) {
+        int down = panel_key(key_map[i].key) != 0, pressed = panel_pressed(key_map[i].key);
+        if (down != key_was[i]) {
+            send_input((u32)key_map[i].aa << 1 | (u32)down);
+            key_was[i] = (u8)down;
+        } else if (pressed && !down) {
+            /* Down and up between two looks. */
+            send_input((u32)key_map[i].aa << 1 | 1);
+            send_input((u32)key_map[i].aa << 1);
+        }
+    }
+    if (panel_return_short()) {
+        send_input(AALINK_KEY_BACK << 1 | 1);
+        send_input(AALINK_KEY_BACK << 1);
+    }
+}
+
+/* While a picture is decoded or shown: the faceplate served, and the
+ * knob's and keys' events sent at once rather than after the picture
+ * (some 100 ms later: the knob felt slow on a unit, 2026-11-18).  The
+ * card processor is idle then, between two of its commands. */
+static int link_up;
+
+static void busy(void)
+{
+    panel_service();
+    if (link_up && !dead)
+        inputs();
+}
+
 /* ---- decoding ------------------------------------------------------ */
 
 static storage_t *dec;
@@ -714,6 +856,27 @@ static void decode(u8 *p, u32 len)
             continue;
         width = h264bsdPicWidth(dec) * 16;
         height = h264bsdPicHeight(dec) * 16;
+        {
+            static int said;
+            u32 range = h264bsdVideoRange(dec), matrix = h264bsdMatrixCoefficients(dec);
+            /* Said at the first picture and at every change.  (Its
+             * text overran a buffer of 48 on a unit, 2026-11-18, where
+             * the phone's stream changed the colours at once and so
+             * said it: the stack spoilt, the unit reset.) */
+            if (!said || (int)range != colour_range || (int)matrix != colour_matrix) {
+                char text[80], *q = put_str(text, "aaviewer: colour: ");
+                said = 1;
+                q = put_str(q, range ? "full range, " : "studio range, ");
+                q = put_str(q, matrix == 1 ? "BT.709" : "BT.601");
+                q = put_str(q, " (matrix ");
+                q = put_dec(q, matrix);
+                *q++ = ')';
+                *q = 0;
+                console_puts(text);
+                console_puts("\n");
+                colour_table((int)range, (int)matrix);
+            }
+        }
         while ((pic = h264bsdNextOutputPicture(dec, &id, &idr, &errs)) != 0) {
             u32 t1 = micros();
             decode_us += t1 - t0;
@@ -760,9 +923,10 @@ static void decode_done(void)
     }
 }
 
+#ifdef AA_TRACE
 static void report(void)
 {
-    char text[120], *q = text;
+    char text[256], *q = text;
     u32 now = millis(), dt = now - last_report;
     static u32 last_frames, last_bytes;
     if (dt < 2000)
@@ -787,6 +951,8 @@ static void report(void)
     q = put_dec(q, missing_blocks);
     q = put_str(q, " skipped ");
     q = put_dec(q, skipped);
+    q = put_str(q, "; inputs ");
+    q = put_dec(q, inputs_sent);
     *q = 0;
     console_puts(text);
     console_puts("\n");
@@ -794,6 +960,11 @@ static void report(void)
     last_bytes = bytes_in;
     last_report = now;
 }
+#else
+static void report(void)
+{
+}
+#endif
 
 /* The state sector: 0, or -1. */
 static int read_state(u8 *b, int ask_key)
@@ -860,7 +1031,12 @@ int main(void)
     crc_init();
 #endif
     found_ccr = REG32(CCR);
-    panel_attach();
+    /* The faceplate controller as aaview (and sdboot before it) left it,
+     * lit; started otherwise (a test), it is started here. */
+    if (h->magic[0] == AA_MAGIC0 && h->magic[1] == AA_MAGIC1)
+        panel_attach();
+    else
+        panel_init();
     sd_idle = panel_service;
     display_idle = panel_service;
     loader_leave = leave;
@@ -878,6 +1054,12 @@ int main(void)
     heap_init((void *)HEAP, HEAP_END - HEAP);
     h264bsdTimer = micros;
     h264bsdFastCopy = 1;
+    /* The faceplate served every few milliseconds while a picture is
+     * decoded too: its line (9600 bit/s) has only a few bytes of buffer,
+     * and once a picture, some 100 ms, lost key frames (on a unit,
+     * 2026-11-18, the keys seemed dead). */
+    h264bsdIdle = busy;
+    show_idle = busy;
     dec = h264bsdAlloc();
     if (!dec || h264bsdInit(dec, 1) != 0) {
         line("NO MEMORY FOR THE DECODER");
@@ -892,13 +1074,17 @@ int main(void)
             pause(3000);
         }
         {
-            char text[48], *q = put_str(text, "BRIDGE IN SLOT ");
+            char text[96], *q = put_str(text, "BRIDGE IN SLOT ");
             q = put_dec(q, (u32)slot + 1);
             q = put_str(q, ", AALINK.BIN AT SECTOR ");
             q = put_dec(q, link_first);
             *q = 0;
             line(text);
         }
+        /* (From the clock: a viewer started again does not begin with
+         * the code the bridge saw last, which it would take for a read
+         * made again.) */
+        input_seq = millis();
         while (begin()) {
             line("THE BRIDGE'S STATE DID NOT READ: AGAIN");
             pause(1000);
@@ -906,6 +1092,7 @@ int main(void)
                 break;
         }
         last_report = millis();
+        link_up = 1;
         while (!dead) {
             u32 want = (s32)(head_hint - next_seq) > 0 ? head_hint - next_seq : 1;
             r = read_blocks(want);
@@ -935,8 +1122,10 @@ int main(void)
                 }
                 pause(2);
             }
+            inputs();
             report();
         }
+        link_up = 0;
         line("THE CARD PROCESSOR STOPPED: STARTING AGAIN");
         dsp_reset();
         pause(500);

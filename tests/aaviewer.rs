@@ -21,6 +21,18 @@ use rnse::machine::Machine;
 use rnse::sh4::cpu::Stop;
 
 fn build() -> Option<Vec<u8>> {
+    // Once for all the tests here, which run side by side.
+    static BUILT: std::sync::Mutex<Option<Option<Vec<u8>>>> = std::sync::Mutex::new(None);
+    let mut built = BUILT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(program) = built.as_ref() {
+        return program.clone();
+    }
+    let program = build_once();
+    *built = Some(program.clone());
+    program
+}
+
+fn build_once() -> Option<Vec<u8>> {
     let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
     let out = std::process::Command::new("sh").arg(sdk.join("build.sh")).args(["192", "aaviewer"])
         .env("EXTRA_CFLAGS", "-DAA_CRC").output().ok()?;
@@ -38,7 +50,9 @@ fn build() -> Option<Vec<u8>> {
 /// The bridge's card with the stream in it, from its host test program.
 fn card(stream: &std::path::Path) -> Option<Vec<u8>> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let dir = std::env::temp_dir().join(format!("rnse-aaviewer-{}", std::process::id()));
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("rnse-aaviewer-{}-{}", std::process::id(), n));
     std::fs::create_dir_all(&dir).unwrap();
     let tool = dir.join("host");
     let src = root.join("sdbridge/src");
@@ -53,8 +67,59 @@ fn card(stream: &std::path::Path) -> Option<Vec<u8>> {
     Some(card)
 }
 
+/// The viewer started where the phone is under way: the codec's
+/// configuration and the key frame gone from the bridge (`tail` past
+/// them), as when the board has run on since a viewer before.
+fn mid_stream(card: &mut [u8], tail: u32) {
+    // AALINK.BIN's first sector: the bridge's volume puts it at 16801
+    // (sdbridge/src/volume.c); its state's key and tail.
+    let at = 16801 * 512;
+    assert_eq!(&card[at..at + 4], b"AALC");
+    card[at + 12..at + 16].copy_from_slice(&tail.to_be_bytes());
+    card[at + 16..at + 20].copy_from_slice(&0xffff_ffffu32.to_be_bytes());
+}
+
 fn console(m: &Machine) -> String {
     String::from_utf8_lossy(&m.console).into_owned()
+}
+
+fn start(program: &[u8], card: Vec<u8>) -> Machine {
+    let mut m = Machine::for_model(Model::Rnse192);
+    m.echo_console = std::env::var_os("RNSE_LINK_ECHO").is_some();
+    m.scramble_ram();
+    m.install_boot_stub("V222");
+    m.board.load(0x0c01_0080, program);
+    m.cpu.reset();
+    m.cpu.set_sr(0x7000_00f0);
+    m.cpu.pc = u32::from_be_bytes([program[0], program[1], program[2], program[3]]);
+    m.cpu.r[15] = 0x8c7a_fff0;
+    m.busy_start();
+    m.watchdog_always = true;
+    m.cache_model();
+    assert!(m.insert_card(1, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    m
+}
+
+/// Started in the middle of the phone's stream with its last key frame
+/// gone: the viewer asks for one, skips the pictures that cannot be
+/// decoded without it, and keeps going (here no key frame comes: the
+/// card is an image).
+#[test]
+fn viewer_started_mid_stream_waits_for_a_key_frame() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let Some(program) = build() else { return };
+    let Some(mut card) = card(&root.join("tests/data/margin.264")) else { return };
+    mid_stream(&mut card, 4);
+    let mut m = start(&program, card);
+    let ms = m.cycles_per_ms();
+    for _ in 0..60 {
+        assert_eq!(m.run(100 * ms), Stop::Budget, "{:?}: {}", m.cpu.fault, console(&m));
+    }
+    let text = console(&m);
+    println!("{}", text);
+    assert!(!text.contains("EXCEPTION") && !text.contains("aaviewer: frame "), "{}", text);
+    let last = text.lines().rev().find(|l| l.contains(" fps x10")).unwrap_or_else(|| panic!("no report: {}", text));
+    assert!(last.starts_with("aaviewer: 0 frames") && !last.contains("skipped 0;"), "{}", last);
 }
 
 #[test]
@@ -101,6 +166,9 @@ fn viewer_decodes_the_bridge_s_stream() {
         std::fs::write(path, rnse::png::encode_rgb(w, h, &rgb)).unwrap();
     }
     assert!(text.contains("BRIDGE IN SLOT 2"), "{}", text);
+    // The stream's colours said once (no colour description: BT.601,
+    // studio range, matrix 2 "unspecified").
+    assert!(text.contains("aaviewer: colour: studio range, BT.601 (matrix 2)"), "{}", text);
     let got = crcs(&m);
     assert_eq!(got.len(), want.len(), "{}", text);
     for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
@@ -110,5 +178,44 @@ fn viewer_decodes_the_bridge_s_stream() {
     m.run(3000 * ms);
     let text = console(&m);
     let last = text.lines().rev().find(|l| l.contains(" fps x10")).unwrap_or_else(|| panic!("no report: {}", text));
-    assert!(last.contains("again 0 ") && last.contains("missing 0 ") && last.ends_with("skipped 0"), "{}", last);
+    assert!(last.contains("again 0 ") && last.contains("missing 0 ") && last.contains("skipped 0;"), "{}", last);
 }
+
+/// The unit's knob and keys for the phone: each an input sector read
+/// (aalink.h, "Input"), the select knob as the rotary controller, its
+/// push as ENTER, a short RETURN as BACK.
+#[test]
+fn viewer_sends_the_knob_and_keys() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let Some(program) = build() else { return };
+    let Some(card) = card(&root.join("tests/data/margin.264")) else { return };
+    let mut m = start(&program, card);
+    let ms = m.cycles_per_ms();
+    for _ in 0..80 {
+        if console(&m).contains("aaviewer: frame 11 ") {
+            break;
+        }
+        assert_eq!(m.run(100 * ms), Stop::Budget, "{:?}: {}", m.cpu.fault, console(&m));
+    }
+    let at = m.console.len();
+    assert!(m.panel_knob("main", 2));
+    assert_eq!(m.run(300 * ms), Stop::Budget);
+    assert!(m.panel_key("SELECT", true));
+    assert_eq!(m.run(300 * ms), Stop::Budget);
+    assert!(m.panel_key("SELECT", false));
+    assert_eq!(m.run(300 * ms), Stop::Budget);
+    assert!(m.panel_key("RETURN", true));
+    assert_eq!(m.run(200 * ms), Stop::Budget);
+    assert!(m.panel_key("RETURN", false));
+    assert_eq!(m.run(500 * ms), Stop::Budget);
+    let text = String::from_utf8_lossy(&m.console[at..]).into_owned();
+    let what: Vec<u32> = text.lines().filter_map(|l| l.strip_prefix("aaviewer: input "))
+        .map(|c| u32::from_str_radix(c.trim(), 16).unwrap() & 0x1ff).collect();
+    // The knob's two detents (in one event or two), ENTER down and up,
+    // BACK down and up.
+    let knob: i32 = what.iter().filter(|w| *w & 0x100 != 0).map(|w| (*w & 0xff) as u8 as i8 as i32).sum();
+    let keys: Vec<u32> = what.iter().copied().filter(|w| w & 0x100 == 0).collect();
+    assert_eq!(knob, 2, "{}", text);
+    assert_eq!(keys, vec![6 << 1 | 1, 6 << 1, 1 << 1 | 1, 1 << 1], "{}", text);
+}
+

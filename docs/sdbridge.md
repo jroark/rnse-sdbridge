@@ -784,6 +784,19 @@ put there by `BRIDGE_RAM` (with no jump tables or library calls made of
 its loops); `arm-none-eabi-size` in the build says what is left for
 mbedTLS's heap (about 61 KB with 128 blocks).
 
+**Input.**  The 192's knob and keys go to the phone the other way
+without a write: each event is a read (CMD17) of one of 4096 sectors
+after the window, the sector's number the event (a sequence number, so
+that a read made again is not taken twice; a key of the head unit's
+and pressed or let go, or the rotary controller's detents).  The bridge
+sends it to the phone as Android Auto's input event (aasdk's
+InputEventIndication: buttons in field 4, relative input in field 6,
+scan code 65536 the rotary controller).  The viewer's mapping: the
+select knob turned is the rotary controller and pushed is ENTER, RETURN
+pressed briefly BACK, NAV home, MEDIA play/pause, NEXT and PREV the
+tracks, the four keys at the screen's corners up, down, right and left;
+RETURN held, the display key and CD EJECT stay the unit's.
+
 **On the 192.**  `AAVIEW.BIN` (`sdk/examples/aaview`, in the SD loader's
 menu) loads `AAVIEWER.IMG` (`sdk/out/aaviewer-192.bin`, linked at
 0x8c010000 by its file `place`: the decoder makes it too big for the
@@ -816,8 +829,32 @@ the second slot, the phone on its USB port, the viewer started from the
 loader's menu: **Google Maps from the phone on the 192's screen**
 (photo), the whole path working the first time.  Its colours were off:
 washed out, the map's light greys pale lilac with speckles of pink
-(the 3-3-2 palette and the colour conversion: next).  Not yet measured:
-the frames a second, and the board's log.
+(the 3-3-2 palette and the colour conversion).  The same evening:
+
+* 10 to 13 pictures a second from the phone through the slot (the
+  board's log: 120-150 KB/s out, decrypting about 30 % of the time, its
+  slowest answer 56 of the host's clocks, no bad CRC).
+* The colour: the viewer's table now has its chroma steps centred on 128
+  (h264bench's took the middle of steps from 0, so that every grey came
+  out with red and blue up and green down), the stream's own range and
+  matrix, and a palette of a 6x6x6 cube and 40 greys, each entry the
+  nearest.  Maps is mostly greys now, as it should be.
+* A crash: the line saying the stream's colours overran a buffer of 48
+  bytes on the stack, and the unit reset to its own software at the
+  first pictures (the test stream says nothing of its colours, so the
+  emulator never printed it).  The line is said once in every stream
+  now, so the tests print it too.
+* The keys: the viewer read the faceplate's line only between pictures;
+  it is now served every few milliseconds, from a hook in the decoder
+  (`h264bsdIdle`) and from the drawing loop.  The display key, CD EJECT
+  and RETURN held worked throughout.
+* The knob and keys for the phone work.  The first try let go of
+  pictures at every turn of the knob (the input sectors were taken as
+  the window's; `aastream_in_window` now, with a test), the 192 then
+  asked for a key frame and the phone's video began anew: a flash.  The
+  knob felt slow: its events now go during decoding and drawing, and the
+  debug console's lines (9600 bit/s, waited for: some 130 ms for a
+  report) are for the test build only.
 
 **Running it.**  As for `SDSTREAM.UF2` (5 V into pin 40, the phone
 through an OTG adapter, the log on GP0 at 115200 baud: a USB-serial

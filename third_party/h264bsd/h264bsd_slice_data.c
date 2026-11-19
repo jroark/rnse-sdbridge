@@ -196,6 +196,10 @@ u32 h264bsdDecodeSliceData(strmData_t *pStrmData, storage_t *pStorage,
         if (pStorage->mb[currMbAddr].decoded == 1)
             mbCount++;
 
+        /* RNS-E SDK: h264bsdIdle (h264bsd_util.h). */
+        if (h264bsdIdle && !(currMbAddr & 63))
+            h264bsdIdle();
+
         /* keep on processing as long as there is stream data left or
          * processing of macroblocks to be skipped based on the last skipRun is
          * not finished */

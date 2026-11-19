@@ -67,6 +67,8 @@ enum {
 extern u32 (*h264bsdTimer)(void);
 extern u32 h264bsdFilterTime;
 extern u32 h264bsdFastCopy;
+/* RNS-E SDK: h264bsd_util.h. */
+extern void (*h264bsdIdle)(void);
 
 u32 h264bsdInit(storage_t *pStorage, u32 noOutputReordering);
 u32 h264bsdDecode(storage_t *pStorage, u8 *byteStrm, u32 len, u32 picId,
