@@ -1,6 +1,6 @@
 /* The link from the bridge to the 192: the phone's video, as the 192
  * reads it through the card slot (SDLINK.UF2, sdbridge/src/sdlink.c, on one
- * side; sdk/examples/aaviewer on the other; docs/sdbridge.md, "The phone's
+ * side; aaviewer/ on the other; docs/sdbridge.md, "The phone's
  * video into the slot").
  *
  * The bridge's card has a file AALINK.BIN in its top directory (one run

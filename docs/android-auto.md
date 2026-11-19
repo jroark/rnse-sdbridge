@@ -124,7 +124,7 @@ give it.
 ## Decoding
 
 `sdk/examples/h264bench` decodes streams from an SD card with
-`sdk/third_party/h264bsd` (the H.264 decoder that was in Android, in
+`third_party/h264bsd` (the H.264 decoder that was in Android, in
 portable C, baseline profile only; Apache 2.0 and MIT) and shows them
 at half size, timing decoding and showing apart.  The streams come from
 `tools/aa-streams.sh`: synthetic pictures, encoded as an Android Auto

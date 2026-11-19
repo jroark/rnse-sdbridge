@@ -1,0 +1,19 @@
+# The bridge's tests on the emulator: the 192's side of the SD link
+# (linkbench, h264bench, the Android Auto viewer, built with the kit's
+# build.sh) against the bridge's card logic built for the host
+# (tests/host.c), and end-to-end runs from the SD loader (tests/disc.rs).
+# No Rust code of its own: the bridge is C for the RP2040, the 192's
+# programs C for the SH-4.  Inside the rnse repository this is a member
+# of its workspace and uses the emulator from the directory above and
+# the kit beside it (RNSE_SDK to use another); on its own it takes the
+# `rnse` crate from git (see split/PLAN.md in rnse).
+[package]
+name = "rnse-sdbridge"
+version = "0.1.0"
+edition = "2021"
+description = "Tests of the RNS-E SD bridge and its 192 programs on the rnse emulator"
+license = "MIT"
+publish = false
+
+[dev-dependencies]
+rnse = { path = ".." }
