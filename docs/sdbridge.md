@@ -362,7 +362,43 @@ sector, not in whole commands; so it is not the bridge's doing but the
 card interface's, or the program's handling of it.  The polled ones lost
 words as with the bridge (late blocks), and single-block reads were
 right but every block late (51 KB/s, `T4095`), which the bridge never
-was.  What stays a matter of speed: a polled host
+was.  A map of each test's first 128 sectors and of the headers
+of their blocks (later builds) showed where: **the first command of 64
+blocks came right every time, and every later one went wrong from its
+second block on**.  Its first block came in right but its transfer did
+not say it was done (the program waited for it 35 ms, `T`), the card
+went on sending, and from then on the program took blocks tens of
+sectors further on, from the middle of one (sector 65's place had
+sector 101's 241st 16-bit word on).  So it is the restart after CMD12,
+not the reading: **one CMD18 for the whole 2 MB came in without a
+wrong word, at 2036 KB/s** (`CMD18 /4 B ONE`, 2026-11-18).  Asking the
+card's status (CMD13) before each later command mended most of it (64
+bad sectors of 4096, one a command, with the last word wrong, and a
+block a command not done in time), a wait of 1 ms did nothing, and the
+card interface's reset left the stopped read's word in front of the
+next (as `docs/hardware.md` has it).  The last word that comes out as
+the block's CRC shifted is the same thing seen from the other side:
+the last word of a block after a restart is stored late.  For a link
+the answer is long reads: a CMD18 that runs as long as the stream does.
+Most of that was one thing, found the same afternoon: the response
+interrupt comes only when SDCTL bit 2 goes up, and nothing linkbench
+did took it down between commands (docs/hardware.md).  Reading the
+response register before each command until it is down (sha256
+`d3ed8fe0`): single-block reads 653 KB/s, 64-block CMD18s in bursts
+2007 KB/s with no wrong word at / 4, where they had been 51 KB/s and
+nearly every sector wrong.  What is left: now and then a whole command
+(1-7 of 64 at / 3 to / 5) whose every block has its last word stored
+late, the first symptom seen with the bridge; the state that decides
+it is set when the command begins and does not show in SDCTL.  That
+went too, the same evening: after each CMD12 the card interface reset
+and the stopped read's word taken by a one-word transfer
+(docs/hardware.md).  Since (sha256 `c2c65b59`), from the 32 MB card in
+SLOT 1: single-block reads 653 KB/s, CMD18 bursts of 64 blocks at / 3
+2626 KB/s, / 4 2007 KB/s, / 5 1618 KB/s, all without a wrong word, and
+one CMD18 for the whole 2 MB 2055 KB/s.  What is not clean is what is
+too fast for the host: polled CMD18s (1.5 MB/s off the port) and / 2
+in bursts.
+What stays a matter of speed: a polled host
 takes 1.5 MB/s off the port, less than the card gives at / 4 (2.1
 MB/s), so polled CMD18 blocks come before the program has a buffer for
 them ("late") and are lost; in bursts (3.1 MB/s) / 4 had no late block

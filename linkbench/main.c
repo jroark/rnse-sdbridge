@@ -180,20 +180,20 @@ static const u32 program[] = {
     0x59040005,     /* r1 = r0 - 5 */
     0x2c001491,     /* if r1 = 0: cmd */
     0x59040006,     /* r1 = r0 - 6 */
-    0x2c003f91,     /* if r1 = 0: read1 */
+    0x2c004c91,     /* if r1 = 0: read1 */
     0x59040007,     /* r1 = r0 - 7 */
-    0x2c004c11,     /* if r1 = 0: readm */
+    0x2c005911,     /* if r1 = 0: readm */
     0x59040008,     /* r1 = r0 - 8 */
-    0x2c005f11,     /* if r1 = 0: portout */
+    0x2c007311,     /* if r1 = 0: portout */
     0x59040009,     /* r1 = r0 - 9 */
-    0x2c006a11,     /* if r1 = 0: portin */
+    0x2c007e11,     /* if r1 = 0: portin */
     0x3881eeee,     /* r1l = 0xeeee: not known */
-    0x2e007200,     /* call wait */
+    0x2e008600,     /* call wait */
     0x48903806,     /* hdt = r1l */
     0x2c7ff480,     /* jmp main */
     /* 0x026f ping */
     0x3881a5a5,     /* r1l = 0xa5a5 */
-    0x2e007000,     /* call wait */
+    0x2e008400,     /* call wait */
     0x48903806,     /* hdt = r1l */
     0x2c7ff280,     /* jmp main */
     /* 0x0273 wrreg */
@@ -203,7 +203,7 @@ static const u32 program[] = {
     0x48913806,     /* r1l = hdt: the value */
     0x44900000,     /* *dp0 = r1l */
     0x3881f000,     /* r1l = 0xf000: done */
-    0x2e006b80,     /* call wait */
+    0x2e007f80,     /* call wait */
     0x48903806,     /* hdt = r1l */
     0x2c7fee00,     /* jmp main */
     /* 0x027c setctl */
@@ -211,7 +211,7 @@ static const u32 program[] = {
     0x4b913806,     /* r7l = hdt: the card interface's setting */
     0x4b903814,     /* sdctl = r7l (and its error flags cleared) */
     0x3881f000,     /* r1l = 0xf000: done */
-    0x2e006800,     /* call wait */
+    0x2e007c00,     /* call wait */
     0x48903806,     /* hdt = r1l */
     0x2c7fea80,     /* jmp main */
     /* 0x0283 rdreg */
@@ -220,7 +220,7 @@ static const u32 program[] = {
     0x3c800000,     /* dp0 = r1l */
     0x00000000,     /* nop */
     0x44910000,     /* r1l = *dp0 */
-    0x2e006400,     /* call wait */
+    0x2e007800,     /* call wait */
     0x48903806,     /* hdt = r1l */
     0x2c7fe680,     /* jmp main */
     /* 0x028b cmd */
@@ -234,7 +234,7 @@ static const u32 program[] = {
     0x2e000800,     /* call issue */
     0x48113814,     /* r0l = sdctl */
     0x8bc00000,     /* r0 = r0 | r6: and 0x80 for a timeout */
-    0x2e005d80,     /* call wait */
+    0x2e007180,     /* call wait */
     0x48103806,     /* hdt = r0l: the header */
     0x38003815,     /* dp0 = rpr */
     0x5a200040,     /* r0 = r1 & 0x40: a long response? */
@@ -243,33 +243,56 @@ static const u32 program[] = {
     0x2c000110,     /* if r0 = 0: short */
     0x38810008,     /* r1l = 8: a long response */
     0x70020800,     /* r0 = *dp0: a word of the response */
-    0x2e005b00,     /* call put */
+    0x2e006f00,     /* call put */
     0x63240000,     /* r1 = r1 - 1 */
     0x2c7ffe99,     /* if r1 != 0: the next */
     0x2c7fdb00,     /* jmp main */
     /* 0x02a2 issue */
     0x61180000,     /* r6 = 0 */
+    0x4b110f72,     /* r6l = *0x0f72: the old way (a test flag): no draining either */
+    0x5ad8ffff,     /* r6 = r6 & 0xffff */
+    0x2c00059e,     /* if r6 != 0: past the draining */
+    0x61180000,     /* r6 = 0 */
+    0x3b010003,     /* r6l = 3: SDCTL bit 2 (a response in) taken down first, by reading the response register */
+    0x48113814,     /* r0l = sdctl */
+    0x5a000004,     /* r0 = r0 & 4  3 words at a time while it is up (so that the read position stays where it was), 9 at most: the eighth read since a response */
+    0x2c000310,     /* if r0 = 0: down  takes it down (on a unit, 2026-11-18), and the interrupt */
+    0x48113815,     /* r0l = rpr  of the next response comes only when it goes up */
+    0x48113815,     /* r0l = rpr */
+    0x48113815,     /* r0l = rpr */
+    0x63d80000,     /* r6 = r6 - 1 */
+    0x2c7ffc9e,     /* if r6 != 0: again */
+    0x61180000,     /* r6 = 0 */
     0x4b100f80,     /* *0x0f80 = r6l: no response yet */
-    0x4b113814,     /* r6l = sdctl: the command goes out as the stock program has it, */
-    0x5ad87f87,     /* r6 = r6 & 0x7f87: the error flags cleared, bits 0-2 written back (bit 2, a response in, cleared by a 1: */
-    0x5bd84000,     /* r6 = r6 | 0x4000: else the next response raises no interrupt) */
+    0x4b110f72,     /* r6l = *0x0f72: 1: the old way (a test sets it) */
+    0x5ad8ffff,     /* r6 = r6 & 0xffff */
+    0x2c00021e,     /* if r6 != 0: old */
+    0x4b903814,     /* sdctl = r7l: the setting with no command first, which takes SDCTL bit 2 down: the interrupt of a response comes only when it goes up */
+    0x5bf84000,     /* r6 = r7 | 0x4000 */
+    0x2c000200,     /* jmp go */
+    0x4b113814,     /* old: r6l = sdctl: (test flag) the bits 0-2 of SDCTL written back as read, as before */
+    0x5ad87f87,     /* r6 = r6 & 0x7f87 */
+    0x5bd84000,     /* r6 = r6 | 0x4000 */
     0x4b103814,     /* sdctl = r6l: the command goes out */
     0x5a200400,     /* r0 = r1 & 0x400: a response? */
     0x61180000,     /* r6 = 0 */
     0x3b01ffff,     /* r6l = 0xffff: the time allowed, 37 clocks a round */
-    0x2c000590,     /* if r0 = 0: nores */
-    /* 0x02ac resp */
+    0x2c000710,     /* if r0 = 0: nores */
+    /* 0x02c0 resp */
     0x48110f80,     /* r0l = *0x0f80: set by the response's interrupt */
     0x5a000002,     /* r0 = r0 & 2 */
-    0x2c000898,     /* if r0 != 0: came */
+    0x2c000a18,     /* if r0 != 0: came */
     0x48113814,     /* r0l = sdctl: or an error flag (cleared at the start): a response */
     0x5a000058,     /* r0 = r0 & 0x58  that raised no interrupt, as ACMD41's, whose CRC field is all ones (not 0x20, CMD12's stray word) */
-    0x2c000718,     /* if r0 != 0: came  (no rep in this loop: 7 ms in all) */
+    0x2c000898,     /* if r0 != 0: came  (no rep in this loop: 7 ms in all) */
     0x63d80000,     /* r6 = r6 - 1 */
     0x2c7ffc9e,     /* if r6 != 0: resp */
+    0x48110f74,     /* r0l = *0x0f74: responses not seen, counted */
+    0x62000000,     /* r0 = r0 + 1 */
+    0x48100f74,     /* *0x0f74 = r0l */
     0x3b010080,     /* r6l = 0x80: none came */
     0x24000000,     /* ret */
-    /* 0x02b6 nores */
+    /* 0x02cd nores */
     0x48113814,     /* r0l = sdctl */
     0x5a004000,     /* r0 = r0 & 0x4000: the command still on the line */
     0x2c000390,     /* if r0 = 0: came */
@@ -279,10 +302,10 @@ static const u32 program[] = {
     0x2c7ffd1e,     /* if r6 != 0: nores */
     0x3b010080,     /* r6l = 0x80 */
     0x24000000,     /* ret */
-    /* 0x02bf came */
+    /* 0x02d6 came */
     0x61180000,     /* r6 = 0 */
     0x24000000,     /* ret */
-    /* 0x02c1 arm */
+    /* 0x02d8 arm */
     0x38010000,     /* r0l = 0 */
     0x48103833,     /* pcr = r0l: stopped */
     0x5a800fff,     /* r0 = r4 & 0xfff */
@@ -292,24 +315,27 @@ static const u32 program[] = {
     0x38010002,     /* r0l = 2 */
     0x48103833,     /* pcr = r0l: started, into X memory */
     0x24000000,     /* ret */
-    /* 0x02ca filled */
+    /* 0x02e1 filled */
     0x61040000,     /* r1 = 0 */
     0x3881ffff,     /* r1l = 0xffff */
-    /* 0x02cc fl */
+    /* 0x02e3 fl */
     0x48113833,     /* r0l = pcr */
     0x5a000002,     /* r0 = r0 & 2: still running */
-    0x2c000310,     /* if r0 = 0: flok */
+    0x2c000490,     /* if r0 = 0: flok */
     0x1c000020,     /* rep 32 */
     0x00000000,     /* nop */
     0x63240000,     /* r1 = r1 - 1 */
     0x2c7ffd19,     /* if r1 != 0: fl */
+    0x48110f75,     /* r0l = *0x0f75: blocks not done, counted */
+    0x62000000,     /* r0 = r0 + 1 */
+    0x48100f75,     /* *0x0f75 = r0l */
     0x5bd80080,     /* r6 = r6 | 0x80: they did not come */
-    /* 0x02d4 flok */
+    /* 0x02ee flok */
     0x24000000,     /* ret */
-    /* 0x02d5 send */
+    /* 0x02ef send */
     0x48913814,     /* r1l = sdctl */
     0x9bc40000,     /* r1 = r1 | r6 */
-    0x2e003c80,     /* call wait */
+    0x2e004380,     /* call wait */
     0x48903806,     /* hdt = r1l: the header */
     0x61040000,     /* r1 = 0 */
     0x38810100,     /* r1l = 256 */
@@ -321,7 +347,7 @@ static const u32 program[] = {
     0x63240000,     /* r1 = r1 - 1 */
     0x2c7ffd19,     /* if r1 != 0: the next */
     0x24000000,     /* ret */
-    /* 0x02e3 read1 */
+    /* 0x02fd read1 */
     0x61080000,     /* r2 = 0 */
     0x49213806,     /* r2h = hdt: the address */
     0x49113806,     /* r2l = hdt */
@@ -332,25 +358,25 @@ static const u32 program[] = {
     0x4a913806,     /* r5l = hdt: how many */
     0x61100000,     /* r4 = 0 */
     0x3a015000,     /* r4l = 0x5000: the buffer */
-    0x2e003500,     /* call drain */
-    /* 0x02ee r1blk */
-    0x2e7fe980,     /* call arm */
+    0x2e003c00,     /* call drain */
+    /* 0x0308 r1blk */
+    0x2e7fe800,     /* call arm */
     0x38814d11,     /* r1l = 0x4d11: CMD17, a response and a block */
     0x48903811,     /* sdidx = r1l */
     0x49203812,     /* agh = r2h */
     0x49103813,     /* agl = r2l */
-    0x2e7fd780,     /* call issue */
-    0x2e7feb00,     /* call filled */
+    0x2e7fca80,     /* call issue */
+    0x2e7fe980,     /* call filled */
     0x38005000,     /* dp0 = 0x5000 */
     0x2e7fef80,     /* call send */
     0xa8680000,     /* r2 = r2 + r3: the next address */
     0x63b40000,     /* r5 = r5 - 1 */
     0x2c7ffa1d,     /* if r5 != 0: r1blk */
     0x3881f000,     /* r1l = 0xf000: done */
-    0x2e002a80,     /* call wait */
+    0x2e003180,     /* call wait */
     0x48903806,     /* hdt = r1l */
-    0x2c7fad00,     /* jmp main */
-    /* 0x02fe readm */
+    0x2c7fa000,     /* jmp main */
+    /* 0x0318 readm */
     0x61080000,     /* r2 = 0 */
     0x49213806,     /* r2h = hdt: the address */
     0x49113806,     /* r2l = hdt */
@@ -359,48 +385,62 @@ static const u32 program[] = {
     0x610c0000,     /* r3 = 0: late blocks */
     0x61100000,     /* r4 = 0 */
     0x3a015000,     /* r4l = 0x5000 */
-    0x2e002880,     /* call drain */
-    0x2e7fdd00,     /* call arm */
+    0x2e002f80,     /* call drain */
+    0x2e7fdb80,     /* call arm */
     0x38814d12,     /* r1l = 0x4d12: CMD18 */
     0x48903811,     /* sdidx = r1l */
     0x49203812,     /* agh = r2h */
     0x49103813,     /* agl = r2l */
-    0x2e7fcb00,     /* call issue */
-    /* 0x030d rmblk */
-    0x2e7fde80,     /* call filled */
+    0x2e7fbe00,     /* call issue */
+    /* 0x0327 rmblk */
+    0x2e7fdd00,     /* call filled */
     0x3e000000,     /* dp0 = r4l: this block */
     0x5c900200,     /* r4 = r4 ^ 0x200: the other buffer (not right behind: on a unit the last word of the one at 0x5000 went wrong with the other at 0x5100) */
     0x63b40000,     /* r5 = r5 - 1 */
-    0x2c000295,     /* if r5 = 0: rmsend */
+    0x2c000515,     /* if r5 = 0: rmsend */
     0x48113814,     /* r0l = sdctl */
     0x5a000001,     /* r0 = r0 & 1: words of the next block already there */
     0x626c0018,     /* if r0 != 0: r3 = r3 + 1 */
-    0x2e7fd600,     /* call arm: for the next block */
-    /* 0x0316 rmsend */
-    0x2e7fdf80,     /* call send */
+    0x48110f70,     /* r0l = *0x0f70: rounds to wait before the next block's transfer is set up (the host sets it; 0: none), */
+    0x5a00ffff,     /* r0 = r0 & 0xffff  to see whether the last word of this block goes into memory later than */
+    0x2c000190,     /* if r0 = 0: no wait  the transfer unit says it is done */
+    0x63000000,     /* r0 = r0 - 1 */
+    0x2c7fff98,     /* if r0 != 0: again (2 clocks a round) */
+    0x2e7fd200,     /* call arm: for the next block */
+    /* 0x0335 rmsend */
+    0x2e7fdd00,     /* call send */
     0x61180000,     /* r6 = 0 */
-    0x2c7ffa9d,     /* if r5 != 0: rmblk */
+    0x2c7ff81d,     /* if r5 != 0: rmblk */
     0x38814c0c,     /* r1l = 0x4c0c: CMD12, a response */
     0x48903811,     /* sdidx = r1l */
     0x38010000,     /* r0l = 0 */
     0x48103812,     /* agh = r0l */
     0x48103813,     /* agl = r0l */
-    0x2e7fc200,     /* call issue */
+    0x2e7fb280,     /* call issue */
     0x48113814,     /* r0l = sdctl */
     0x8bc00000,     /* r0 = r0 | r6 */
-    0x2e001780,     /* call wait */
+    0x2e001c00,     /* call wait */
     0x48103806,     /* hdt = r0l */
-    0x2e001680,     /* call wait */
+    0x2e001b00,     /* call wait */
     0x49903806,     /* hdt = r3l: late blocks */
-    0x2c7f9900,     /* jmp main */
-    /* 0x0326 portout */
+    0x48110f73,     /* r0l = *0x0f73: 1: no cleaning after CMD12 (a test sets it) */
+    0x5a00ffff,     /* r0 = r0 & 0xffff */
+    0x2c7f8898,     /* if r0 != 0: main */
+    0x5be00100,     /* r0 = r7 | 0x100: after CMD12 the card interface reset (on a unit, 2026-11-18, now and then a */
+    0x48103814,     /* sdctl = r0l  whole command came with every last word of a block stored late otherwise, never */
+    0x4b903814,     /* sdctl = r7l  in 192 commands so: the state that does it is set when the command begins) */
+    0x61040000,     /* r1 = 0 */
+    0x38810001,     /* r1l = 1: and the word the stopped read left taken by a one-word transfer, whatever SDCTL */
+    0x2e001e00,     /* call the transfer of drain  bit 0 says (the reset hides it; there was one every time) */
+    0x2c7f8500,     /* jmp main */
+    /* 0x034e portout */
     0x61140000,     /* r5 = 0 */
     0x4a913806,     /* r5l = hdt: how many */
     0x61040000,     /* r1 = 0: the count, in r1h */
     0x610c0000,     /* r3 = 0 */
     0x39810001,     /* r3l = 1 */
     0x5f6c0010,     /* r3 = r3 << 16: 1 in r3h */
-    /* 0x032c poblk */
+    /* 0x0354 poblk */
     0x38015a5a,     /* r0l = 0x5a5a */
     0x2e001180,     /* call wait */
     0x48103806,     /* hdt = r0l: the header */
@@ -418,13 +458,13 @@ static const u32 program[] = {
     0x2e000b00,     /* call wait */
     0x3881f000,     /* r1l = 0xf000: done */
     0x48903806,     /* hdt = r1l */
-    0x2c7f8d00,     /* jmp main */
-    /* 0x033e portin */
+    0x2c7f7900,     /* jmp main */
+    /* 0x0366 portin */
     0x61140000,     /* r5 = 0 */
     0x4a913806,     /* r5l = hdt: how many */
     0x61000000,     /* r0 = 0 */
     0x61080000,     /* r2 = 0 */
-    /* 0x0342 piblk */
+    /* 0x036a piblk */
     0x61100000,     /* r4 = 0 */
     0x3a010100,     /* r4l = 256 */
     0x48213806,     /* r0h = hdt */
@@ -438,23 +478,30 @@ static const u32 program[] = {
     0x2e000200,     /* call wait */
     0x3881f000,     /* r1l = 0xf000: done */
     0x48903806,     /* hdt = r1l */
-    0x2c7f8400,     /* jmp main */
-    /* 0x0350 wait: until the host took the last word (HST bit 1 clear) */
+    0x2c7f7000,     /* jmp main */
+    /* 0x0378 wait: until the host took the last word (HST bit 1 clear) */
     0x4b113807,     /* r6l = hst */
     0x5ad80002,     /* r6 = r6 & 2: a word still for the host */
     0x2c7fff1e,     /* if r6 != 0: wait */
     0x24000000,     /* ret */
-    /* 0x0354 put: r0h to the host */
+    /* 0x037c put: r0h to the host */
     0x2e7ffe00,     /* call wait */
     0x48203806,     /* hdt = r0h */
     0x24000000,     /* ret */
-    /* 0x0357 drain: words the card interface keeps for nobody (SDCTL bit 0), taken by one-word buffer transfers into spare memory: reading the data register does not take them on a unit */
+    /* 0x037f drain: words the card interface keeps for nobody (SDCTL bit 0), taken by one-word buffer transfers into spare memory: reading the data register does not take them on a unit */
+    0x48113814,     /* r0l = sdctl */
+    0x48100f77,     /* *0x0f77 = r0l: SDCTL as the drain began (for the host) */
+    0x61000000,     /* r0 = 0 */
+    0x48100f76,     /* *0x0f76 = r0l: words taken, counted below */
     0x61040000,     /* r1 = 0 */
     0x38810004,     /* r1l = 4: at most so many */
-    /* 0x0359 dl */
+    /* 0x0385 dl */
     0x48113814,     /* r0l = sdctl */
     0x5a000001,     /* r0 = r0 & 1: a word there */
-    0x2c000a10,     /* if r0 = 0: done */
+    0x2c000b90,     /* if r0 = 0: done */
+    0x48110f76,     /* r0l = *0x0f76 */
+    0x62000000,     /* r0 = r0 + 1 */
+    0x48100f76,     /* *0x0f76 = r0l */
     0x38010000,     /* r0l = 0 */
     0x48103833,     /* pcr = r0l: stopped */
     0x38010f00,     /* r0l = 0xf00 */
@@ -465,18 +512,18 @@ static const u32 program[] = {
     0x48103833,     /* pcr = r0l: started */
     0x61180000,     /* r6 = 0 */
     0x3b01ffff,     /* r6l = 0xffff: the time allowed */
-    /* 0x0366 dw */
+    /* 0x0395 dw */
     0x48113833,     /* r0l = pcr */
     0x5a000002,     /* r0 = r0 & 2: still running */
     0x2c000190,     /* if r0 = 0: taken */
     0x63d80000,     /* r6 = r6 - 1 */
     0x2c7ffe1e,     /* if r6 != 0: again */
-    /* 0x036b dtaken */
+    /* 0x039a dtaken */
     0x38010000,     /* r0l = 0 */
     0x48103833,     /* pcr = r0l: stopped */
     0x63240000,     /* r1 = r1 - 1 */
-    0x2c7ff599,     /* if r1 != 0: the next */
-    /* 0x036f dret */
+    0x2c7ff419,     /* if r1 != 0: the next */
+    /* 0x039e dret */
     0x24000000,     /* ret */
 };
 
@@ -493,29 +540,49 @@ static const struct test {
     const char *name;
     u8 kind, multi, burst;
     u16 ctl;
+    /* Rounds (2 of the card processor's clocks each) between a block's
+     * transfer ending and the next block's being set up, in CMD18
+     * (0x0f70).  Tried on a unit, 2026-11-18, against the last words
+     * stored late: 16 to 128 changed nothing (the cause was what CMD12
+     * leaves, see "how" 64).  All 0 now. */
+    u8 delay;
+    /* 4: one command for the whole file, none after the first.  16:
+     * commands started the old way (0x0f72): the response register not
+     * read before each to take SDCTL bit 2 down, so the response's
+     * interrupt, which comes only when it goes up, does not come (on a
+     * unit, 2026-11-18: every single-block read 7 ms late).  64: no
+     * cleaning after CMD12 (0x0f73): on a unit now and then a whole
+     * CMD18 had every block's last word stored late. */
+    u8 how;
 } tests[] = {
-    { "STOCK DRIVER", STOCK, 0, 0, 0 },
-    { "PORT OUT", PORT_OUT, 0, 0, 0 },
-    { "PORT IN", PORT_IN, 0, 0, 0 },
-    { "CMD17 /4", CARD, 0, 0, CTL(3) },
-    { "CMD18 /4", CARD, 1, 0, CTL(3) },
-    { "CMD18 /3", CARD, 1, 0, CTL(2) },
-    { "PORT OUT BURST", PORT_OUT, 0, 1, 0 },
-    { "CMD18 /4 BURST", CARD, 1, 1, CTL(3) },
-    { "CMD18 /3 BURST", CARD, 1, 1, CTL(2) },
-    { "CMD18 /2", CARD, 1, 0, CTL(1) },
-    { "CMD18 /2 BURST", CARD, 1, 1, CTL(1) },
+    { "STOCK DRIVER", STOCK, 0, 0, 0, 0, 0 },
+    { "PORT OUT", PORT_OUT, 0, 0, 0, 0, 0 },
+    { "PORT IN", PORT_IN, 0, 0, 0, 0, 0 },
+    { "CMD17 /4", CARD, 0, 0, CTL(3), 0, 0 },
+    { "CMD18 /4", CARD, 1, 0, CTL(3), 0, 0 },
+    { "CMD18 /3", CARD, 1, 0, CTL(2), 0, 0 },
+    { "PORT OUT BURST", PORT_OUT, 0, 1, 0, 0, 0 },
+    { "CMD18 /4 BURST", CARD, 1, 1, CTL(3), 0, 0 },
+    { "CMD18 /3 BURST", CARD, 1, 1, CTL(2), 0, 0 },
+    { "CMD18 /2", CARD, 1, 0, CTL(1), 0, 0 },
+    { "CMD18 /2 BURST", CARD, 1, 1, CTL(1), 0, 0 },
     /* At / 5, slow enough for a burst with twice the pause (burst 2)
      * to keep up: the same burst with the pause doubled says whether
      * a block's last word going wrong (on the unit, 2026-11-17) is the
      * host reading too soon. */
-    { "CMD18 /5 BURST", CARD, 1, 1, CTL(4) },
-    { "CMD18 /5 BUR40", CARD, 1, 2, CTL(4) },
+    { "CMD18 /5 BURST", CARD, 1, 1, CTL(4), 0, 0 },
+    { "CMD18 /5 BUR40", CARD, 1, 2, CTL(4), 0, 0 },
+    { "CMD18 /4 B ONE", CARD, 1, 1, CTL(3), 0, 4 },
+    /* Comparisons for a unit: the old ways, which on one went wrong
+     * (2026-11-18). */
+    { "CMD18 /5 B NOC", CARD, 1, 1, CTL(4), 0, 64 },
+    { "CMD17 /4 OLD", CARD, 0, 0, CTL(3), 0, 16 },
 };
 #define TESTS (int)(sizeof tests / sizeof tests[0])
 
 static struct result {
     u32 bytes, us, bad, timeouts, late;
+    u16 resp_lost, fill_lost;   /* the program's counts: responses not seen, blocks not done */
     u16 status;
     u8 ran, failed, checked;
     /* The first bad sector, looked at: which, its first wrong word, what
@@ -748,6 +815,7 @@ static u32 card_pace = 20;       /* ms between the steps of a start */
  * back to its first word (docs/hardware.md), which a long response's 8
  * words may otherwise leave elsewhere. */
 static u16 start_ctl;
+static u32 rca;                  /* the card's address, from CMD3 */
 /* And for each, a line: the command, its header, the interrupts that
  * came (bit n: 0x0f90 + n set) and SDCTL after. */
 static int start_cmd(u16 reg, u32 arg, u16 *r)
@@ -797,7 +865,7 @@ static void bit2_test(void)
 static int card_start(void)
 {
     u16 r[8];
-    u32 hcs, t, rca;
+    u32 hcs, t;
     int h;
     start_c8 = start_c2 = 0xffff;
     start_c3[0] = start_c3[1] = start_c3[2] = 0;
@@ -871,6 +939,8 @@ static int take_over(void)
     int r = dsp_load();
     if (r)
         return 100 - r;
+    if (wrreg(0x0f70, 0) || wrreg(0x0f72, 0) || wrreg(0x0f73, 0)) /* card_test sets them */
+        return 111;
     if (pins_known) {
         /* The latch first, then the directions (bit 13: change them,
          * bit 12: to outputs, the low byte: which).  Pin 2 high: it is
@@ -896,6 +966,23 @@ static int take_over(void)
 #ifndef BURST_PACE
 #define BURST_PACE 20
 #endif
+
+/* The first 128 sectors of each test, a character each: '.' right,
+ * 'L' only the last word wrong, 'F' only the first, 'X' every word,
+ * '?' something else. */
+#define MAPPED 128
+static char sector_map[TESTS][MAPPED];
+/* And each block's header there: '.' nothing, 'T' it did not come in
+ * time (0x80), 'O' SDCTL bit 5 (0x20, what a stopped read leaves), 'B'
+ * both. */
+static char header_map[TESTS][MAPPED];
+static u32 first_of_test;
+/* For each of a CMD18 test's first 64 commands: 'C' '.' right, 'L'
+ * blocks with only the last word wrong and no other, 'X' anything else;
+ * 'D' the words the drain took before it; 'S' SDCTL as the drain began,
+ * bits 0-2 and 5 (as bit 3) in a hex digit. */
+#define COMMANDS 64
+static char cmd_map[TESTS][3][COMMANDS];
 
 /* One block: its header, and its 256 words into buf. */
 /* Blocks whose last word a burst found not yet there (counted by a
@@ -967,10 +1054,13 @@ static int read_cmd18(u32 sector, u32 n, u8 *to, struct result *r, int burst)
     if (put(7) || put((u16)(a >> 16)) || put((u16)a) || put((u16)n))
         return -1;
     for (i = 0; i < n; i++) {
+        u32 k = sector - first_of_test + i;
         b = block_in((u16 *)(to + 512 * i), burst);
         if (b < 0)
             return -1;
         note(r, b);
+        if (k < MAPPED)
+            header_map[r - res][k] = b & 0x80 ? (b & 0x20 ? 'B' : 'T') : (b & 0x20 ? 'O' : '.');
     }
     if (get(&h, 1000) || get(&late, 100))
         return -1;
@@ -1060,12 +1150,23 @@ static void look_at(struct result *r, u32 j, u32 got)
     }
 }
 
+
 static u32 check(const u8 *buf, u32 n, struct result *r)
 {
     u32 s, i, bad = 0;
     r->run_starts = r->run_ends = r->odd = 0;
     for (s = 0; s < n; s++) {
         const u32 *w = (const u32 *)(buf + 512 * s);
+        if (s < MAPPED) {
+            u32 wrong = 0, at = 0;
+            for (i = 0; i < 128; i++)
+                if (w[i] != expected(s * 128 + i)) {
+                    if (!wrong)
+                        at = i;
+                    wrong++;
+                }
+            sector_map[r - res][s] = wrong == 0 ? '.' : wrong == 128 ? 'X' : wrong > 1 ? '?' : at == 127 ? 'L' : at == 0 ? 'F' : '?';
+        }
         for (i = 0; i < 128; i++)
             if (w[i] != expected(s * 128 + i))
                 break;
@@ -1326,12 +1427,13 @@ static void card_test(int t)
         return;
     r->ran = 1;
     burst_early = 0;
-    if (setctl(T->ctl)) {
+    first_of_test = first_sector;
+    if (wrreg(0x0f70, T->delay) || wrreg(0x0f72, T->how & 16 ? 1 : 0) || wrreg(0x0f73, T->how & 64 ? 1 : 0) || wrreg(0x0f74, 0) || wrreg(0x0f75, 0) || setctl(T->ctl)) {
         r->failed = 1;
         return;
     }
     while (done < sectors) {
-        n = sectors - done > RUN ? RUN : sectors - done;
+        n = sectors - done > RUN && !(T->how & 4) ? RUN : sectors - done;
         t0 = micros();
         rc = T->multi ? read_cmd18(first_sector + done, n, DATA + 512 * done, r, T->burst)
                       : read_cmd17(first_sector + done, n, DATA + 512 * done, r, T->burst);
@@ -1340,9 +1442,33 @@ static void card_test(int t)
             break;
         if (T->multi && T->burst && have_file)
             look_at_run(t, done, n);
+        if (T->multi && done / RUN < COMMANDS && n == RUN) {
+            u32 c = done / RUN, b, k, last = 0, other = 0;
+            u16 dn = 0, dc = 0;
+            for (b = 0; b < n; b++) {
+                const u32 *w = (const u32 *)(DATA + 512 * (done + b));
+                u32 wrong = 0, at = 0;
+                for (k = 0; k < 128; k++)
+                    if (w[k] != expected((done + b) * 128 + k)) {
+                        at = k;
+                        wrong++;
+                    }
+                if (wrong == 1 && at == 127)
+                    last++;
+                else if (wrong)
+                    other++;
+            }
+            (void)rdreg(0x0f76, &dn);
+            (void)rdreg(0x0f77, &dc);
+            cmd_map[t][0][c] = other ? 'X' : last ? 'L' : '.';
+            cmd_map[t][1][c] = (char)('0' + (dn > 9 ? 9 : dn));
+            cmd_map[t][2][c] = "0123456789ABCDEF"[(dc & 7) | (dc >> 2 & 8)];
+        }
         done += n;
         panel_service();
     }
+    (void)rdreg(0x0f74, &r->resp_lost);
+    (void)rdreg(0x0f75, &r->fill_lost);
     r->bytes = done * 512;
     if (rc) {
         r->failed = 1;
@@ -1671,6 +1797,9 @@ int main(void)
             revive();
         }
         line("  WHAT TAKES THE STRAY WORD");
+        (void)wrreg(0x0f70, 0);
+        (void)wrreg(0x0f72, 0);
+        (void)wrreg(0x0f73, 0);
         stray_test();
         if (bridge < 0)
             through_the_card();
@@ -1789,6 +1918,69 @@ int main(void)
             rec((u8)(0x60 + t), 8, (u32)x->found, x->run_starts << 8 | x->run_ends);
             shown++;
         }
+    /* The program's own counts for each card test: responses whose
+     * interrupt did not come in time, blocks whose transfer did not say
+     * it was done. */
+    for (t = 0; t < TESTS; t++) {
+        if (!res[t].ran || tests[t].kind != CARD)
+            continue;
+        q = put_str(text, "Q");
+        q = put_dec(q, (u32)t);
+        q = put_str(q, " RESP ");
+        q = put_dec(q, res[t].resp_lost);
+        q = put_str(q, " FILL ");
+        q = put_dec(q, res[t].fill_lost);
+        *q = 0;
+        line(text);
+    }
+    /* The commands' maps (see cmd_map). */
+    for (t = 0; t < TESTS; t++) {
+        u32 m;
+        if (!res[t].ran || !tests[t].multi || !cmd_map[t][0][0])
+            continue;
+        for (m = 0; m < 3; m++)
+            for (i = 0; i < COMMANDS; i += 32) {
+                u32 k;
+                q = put_str(text, m == 0 ? "C" : m == 1 ? "D" : "S");
+                q = put_dec(q, (u32)t);
+                *q++ = ' ';
+                q = put_dec(q, i);
+                *q++ = ' ';
+                for (k = 0; k < 32; k++)
+                    *q++ = cmd_map[t][m][i + k] ? cmd_map[t][m][i + k] : ' ';
+                *q = 0;
+                line(text);
+            }
+    }
+    /* The maps (see check), for the multiple-block tests. */
+    for (t = 0; t < TESTS; t++) {
+        if (!res[t].checked || !tests[t].multi || !res[t].bad)
+            continue;
+        for (i = 0; i < MAPPED; i += 32) {
+            u32 k;
+            q = put_str(text, "M");
+            q = put_dec(q, (u32)t);
+            *q++ = ' ';
+            q = put_dec(q, i);
+            *q++ = ' ';
+            for (k = 0; k < 32; k++)
+                *q++ = sector_map[t][i + k] ? sector_map[t][i + k] : ' ';
+            *q = 0;
+            line(text);
+        }
+        for (i = 0; i < MAPPED; i += 32) {
+            u32 k;
+            q = put_str(text, "H");
+            q = put_dec(q, (u32)t);
+            *q++ = ' ';
+            q = put_dec(q, i);
+            *q++ = ' ';
+            for (k = 0; k < 32; k++)
+                *q++ = header_map[t][i + k] ? header_map[t][i + k] : ' ';
+            *q = 0;
+            line(text);
+        }
+    }
     rec(0xff, 0xff, millis(), 0);
     /* The stock program back, as the loader expects to find it. */
     if (stock == 0) {

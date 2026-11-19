@@ -100,7 +100,11 @@ fn result<'a>(text: &'a str, name: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no line for {}: {}", name, text))
 }
 
-const CARD_TESTS: [&str; 9] = ["CMD17 /4", "CMD18 /4", "CMD18 /3", "CMD18 /4 BURST", "CMD18 /3 BURST", "CMD18 /2", "CMD18 /2 BURST", "CMD18 /5 BURST", "CMD18 /5 BUR40"];
+// (Nor the "OLD" one, which starts commands the way that leaves SDCTL bit
+// 2 up and so gets no response interrupt: on a unit, and in the model,
+// late; kept to compare.)
+const CARD_TESTS: [&str; 11] = ["CMD17 /4", "CMD18 /4", "CMD18 /3", "CMD18 /4 BURST", "CMD18 /3 BURST", "CMD18 /2", "CMD18 /2 BURST", "CMD18 /5 BURST", "CMD18 /5 BUR40",
+    "CMD18 /4 B ONE", "CMD18 /5 B NOC"];
 const PORT_TESTS: [&str; 3] = ["PORT OUT", "PORT IN", "PORT OUT BURST"];
 
 /// Every word as it should be, nothing late or missing.  A CMD18 run
