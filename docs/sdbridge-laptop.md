@@ -87,7 +87,11 @@ SH-4 GCC on the PATH; without one they pass without running.
 
 Hold the board's BOOT/BOOTSEL button while plugging it into the laptop,
 and copy the UF2 onto the `RPI-RP2` drive that appears.  For a Pico, use
-the files in `sdbridge/out/pico/`.
+the files in `sdbridge/out/pico/`.  A board running `SDBRIDGE.UF2` (USB
+serial) needs no button: `python3 sdbridge/link.py bootsel
+/dev/cu.usbmodem*` brings the drive up.  `link.py` also sends
+`linkbench` builds to it (docs/sdbridge.md, "Iterating with the bridge
+on the laptop's USB").
 
 **Then unplug it from the laptop before powering it any other way.**
 For the phone tests the board is powered with 5 V on VBUS (a Pico's pin
@@ -104,13 +108,14 @@ screen /dev/ttyUSB0 115200                  # Linux
 
 ## Where it stands
 
-* `linkbench` (the 192): written and run in the emulator, where the
-  card interface's modelled rate is the limit (2.1 MB/s at the stock
-  clock).  **Not yet run on the unit.**  That run gives the real rate
-  of a slot.
-* The board as a card (`SDBRIDGE.UF2`): written; its card logic, volume
-  and PIO timing tested on the host and in the simulator.  **Not yet run
-  in the unit's slot.**
+* `linkbench` (the 192): **runs on the unit** (2026-11-17, after its
+  card processor program was changed to poll the host port): the host
+  port carries 1.5 MB/s polled, 3.1 MB/s in bursts; CMD17 809 KB/s.
+* The board as a card (`SDBRIDGE.UF2`): **works in the unit's slot**
+  (2026-11-16/17): the stock card program read 1 MB of `LINKTEST.BIN`
+  from it at 393 KB/s and `linkbench`'s own CMD17 at 809 KB/s, every
+  word right; CMD18 (several blocks a command) comes back wrong, cause
+  not yet known (figures in [sdbridge.md](sdbridge.md)).
 * The phone on the desk (`SDPHONE.UF2`): **works** on a Pico with a
   real phone: accessory mode, Android Auto's version exchange.
 * The TLS handshake (`SDHANDSHAKE.UF2`): written and tested on the host
@@ -130,11 +135,11 @@ screen /dev/ttyUSB0 115200                  # Linux
    USB).  Decryption on the second core is there if more is ever
    needed.  Next is the bridge itself: the card firmware in the slot,
    writes for the way back, and the two in one.
-2. Run `linkbench` on the unit with an ordinary card and `LINKTEST.BIN`
-   (`python3 tools/linktest.py > LINKTEST.BIN`): the slot's real rates.
-3. Run `SDBRIDGE.UF2` in the slot on the ribbon (wiring in
-   [sdbridge.md](sdbridge.md)) and `linkbench` against it: the bridge
-   as a card, and its "slowest answer" in the log.
+2. Find why CMD18 comes back wrong on the unit: `linkbench` against
+   the bridge again (the `T.. S.. W..` lines say what the bad words
+   are), and with an ordinary card holding `LINKTEST.BIN` (`python3
+   tools/linktest.py > LINKTEST.BIN`) in the first slot instead, to
+   tell the bridge from the card processor program.
 4. Then the writes into the card (CMD24/25), the two directions through
    the slot, and the two firmwares in one.
 

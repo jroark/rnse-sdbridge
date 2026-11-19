@@ -150,12 +150,71 @@ static int __not_in_flash_func(send)(uint32_t gen, const uint32_t *b)
 
 static const char *const state_names[] = { "idle", "ready", "ident", "stby", "tran", "data" };
 
-/* Between requests: the LED and the log. */
+/* A program from the Mac for the volume's LINKBENC.BIN (volume.h), over
+ * the USB serial port: a line "PUT <bytes> <FNV-1a 32 of them, hex>",
+ * then the bytes.  The file is gone while they come and back when they
+ * are all there and the sum agrees; the answer is a line "put: ...".
+ * (sdbridge/link.py sends it.)  Read between requests only, so nothing
+ * of it holds up the card. */
+static void upload(void)
+{
+    static char line[48];
+    static uint32_t got, want, sum, want_sum, last_ms;
+    static int len, receiving;
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    int c, n;
+    if (receiving && now - last_ms > 2000) {
+        printf("put: stopped after %lu of %lu bytes\n", (unsigned long)got, (unsigned long)want);
+        receiving = 0;
+    }
+    for (n = 0; n < 4096 && (c = getchar_timeout_us(0)) >= 0; n++) {
+        last_ms = now;
+        if (receiving) {
+            volume_program[got++] = (uint8_t)c;
+            sum = (sum ^ (uint8_t)c) * 16777619u;
+            if (got == want) {
+                receiving = 0;
+                if (sum == want_sum) {
+                    volume_program_bytes = want;
+                    printf("put: LINKBENC.BIN, %lu bytes, sum %08lx: ok\n", (unsigned long)want, (unsigned long)sum);
+                } else {
+                    printf("put: sum %08lx, wanted %08lx: refused\n", (unsigned long)sum, (unsigned long)want_sum);
+                }
+            }
+            continue;
+        }
+        if (c == '\r')
+            continue;
+        if (c != '\n') {
+            if (len < (int)sizeof line - 1)
+                line[len++] = (char)c;
+            continue;
+        }
+        line[len] = 0;
+        len = 0;
+        {
+            unsigned long w, ws;
+            if (sscanf(line, "PUT %lu %lx", &w, &ws) == 2 && w > 0 && w <= VOLUME_PROGRAM_MAX) {
+                volume_program_bytes = 0;
+                want = (uint32_t)w;
+                want_sum = (uint32_t)ws;
+                got = 0;
+                sum = 2166136261u;
+                receiving = 1;
+            } else if (line[0]) {
+                printf("put: what is \"%s\"?\n", line);
+            }
+        }
+    }
+}
+
+/* Between requests: the LED, the log and a program from the Mac. */
 static void idle(void)
 {
     static uint32_t last_ms, last_blocks, last_crc;
     uint32_t now = to_ms_since_boot(get_absolute_time());
     status_tick();
+    upload();
     while (ring_out != ring_in) {
         uint32_t k = ring_out % RING;
         uint32_t what = ring[k][0], arg = ring[k][1];

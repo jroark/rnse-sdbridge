@@ -127,6 +127,35 @@ The two figures to compare with the same benchmark on a real card: the
 rates (the card interface's, if the bridge keeps up) and the bad sector
 counts, which should be 0 everywhere.
 
+### Iterating with the bridge on the laptop's USB
+
+The bridge can carry the program too, so that a new build of
+`linkbench` needs no card and no photograph.  It has `LINKBENC.BIN` on
+its card (after `LINKTEST.BIN`, which is too big for `sdboot` to take
+for a program, so `LINKBENC.BIN` is its only one and starts by itself),
+held in RAM and sent over the board's USB serial port:
+
+```sh
+python3 sdbridge/link.py serve /dev/cu.usbmodem* sdbridge/work/bridge.log sdbridge/work/push/LINKBENC.BIN &
+cp sdk/out/linkbench-192.bin sdbridge/work/push/LINKBENC.BIN   # each new build
+python3 sdbridge/link.py results sdbridge/work/bridge.log       # what the last run said
+```
+
+`serve` logs the bridge and sends the file whenever it changes
+(`PUT <bytes> <FNV-1a>` and the bytes; the file is gone from the
+bridge's card until all of it is there).  On the unit the bridge goes in
+SLOT 2 and the card to test in SLOT 1 (or the bridge alone, to test
+itself).  `linkbench` tests SLOT 1's card, and when the other slot's
+card has `LINKBENC.BIN` it sends everything through that card by the
+stock program there, its screen's text included (`results` prints it),
+and then waits: every 2 s it reads `LINKBENC.BIN` again, and when that
+has changed it runs it in its own place (`run_image`).  So after the
+first start every new build runs by itself; RETURN held still goes back
+to the loader.  `link.py bootsel PORT` restarts the board into its
+`RPI-RP2` drive (the port at 1200 baud) for a new UF2, with no button.
+`tests/disc.rs` `link_benchmark_from_the_sd_loader` runs the loop on the
+emulated unit, a changed card standing in for a push.
+
 ## How it works
 
 * `src/sd.pio`: two PIO programs.  On PIO0 the command line: a command
@@ -180,6 +209,200 @@ electrical.  Only a unit can say:
   answer");
 * whether the interface's clock really is 16.9 MHz at the stock
   setting.
+
+**Seen on hardware, 2026-11-16:** a Raspberry Pi Pico with `SDBRIDGE.UF2`
+at 200 MHz, in the first slot of the user's 192 (V222, software 0350)
+on a ribbon, CLK, CMD and DAT0 through 100 ohm, ground, no VDD (the Pico
+powered from USB), and `linkbench` started by the SD loader from a card
+in the second slot.  The installed software's card processor program
+started the bridge as a card, found `LINKTEST.BIN` on its volume and
+read 1 MB of it at **393 KB/s (3.1 Mbit/s) with every word right**, no
+block missing or late: the bridge works as a card for the stock driver,
+at the stock clock.  `linkbench`'s own tests did not run: its program
+for the card processor, loaded in place of the stock one, did not get
+past the card's start.  A second run on 2026-11-17 with the Pico's log
+said where: the stock start (CMD0, CMD8, ACMD41 rounds, CMD2, 3, 9, 10,
+7, 16, a step every 150 ms, the slowest answer 70 of the host's clocks)
+and 2068 reads at 383 KB/s, then the benchmark's program sent CMD0 some
+ten times, once for each start, about 200 ms apart, and never a CMD8:
+the main processor got the header of each answer and not its words.
+The program wrote them by a repeated move into the host port, which
+the emulator holds until the host reads and a unit evidently does not
+(docs/hardware.md, "SD card processors"); it now polls the status
+before each word.
+
+The third run (2026-11-17, the same set-up, `LINKBENC.BIN` sha256
+`68b5f50e`) went all the way through, with the bridge's log:
+
+| Test | KB/s | Mbit/s | Bad sectors (of 4096) | Not in time | Late | Status |
+|---|---|---|---|---|---|---|
+| stock driver (CMD17, a message a sector) | 393 | 3.1 | 0 | 0 | 0 | |
+| port out (card processor to host, polled) | 1547 | 12.3 | 0 | 0 | 0 | |
+| port in (host to card processor, polled) | 1594 | 12.7 | 0 | 0 | 0 | |
+| CMD17 / 4 | 809 | 6.4 | 0 | 0 | 0 | |
+| CMD18 / 4 | 1525 | 12.2 | 4094 | 0 | 3968 | 8020 |
+| CMD18 / 3 | 1529 | 12.2 | 4096 | 0 | 3983 | 8020 |
+| port out, burst | 3128 | 25.0 | 0 | 0 | 0 | |
+| CMD18 / 4, burst | 2075 | 16.6 | 4092 | 0 | 0 | 8020 |
+| CMD18 / 3, burst | 2753 | 22.0 | 4027 | 0 | 1136 | 8020 |
+| CMD18 / 2 | 1533 | 12.2 | 4096 | 0 | 4005 | 8060 |
+| CMD18 / 2, burst | 3070 | 24.5 | 4096 | 0 | 4010 | 8020 |
+
+So: the bridge answers every command and every block comes (no
+timeouts; on its side no bad CRC, and its slowest answer 70 of the
+host's clocks at the stock 16.9 MHz), CMD17 from it is right to the
+word at 809 KB/s, twice the stock way, and the host port carries 1.5
+MB/s polled and 3.1 MB/s in bursts.  Polled, the host is slower than
+the card at / 4 (2.1 MB/s), so CMD18's blocks come before the program
+has a buffer for them ("late"); but CMD18's words are wrong even where
+none was late (/ 4 burst), so something in the multi-block read itself
+differs on the unit, the bridge's or the program's: the card
+interface's status has bit 5 set (and bit 6 at / 2), which the emulator
+does not give a meaning.  `linkbench` now looks at the first bad sector
+of each test (a line `T<test> S<sector> W<word> <came>/<wanted> D<where
+in the file the word that came is> K<bits shifted> R<bad first sectors
+of a command>`), and a run with an ordinary card in the bridge's place
+tells the bridge from the program.
+
+The fourth run (the same, `LINKBENC.BIN` sha256 `d4657f9d`) gave the
+same figures and said what the bad words were: `T5 S0 W0
+1B06640C/640CA17E` and the like at the start of every command, the
+words one 16-bit word late behind a stray one, which the card
+interface had kept from the block the bridge had begun when the last
+CMD18 was stopped.  The emulator now keeps one the way the unit does
+(docs/hardware.md, "SD card processors").  The fifth run (sha256
+`5b412254`) read the data register before each command while SDCTL bit
+0 was set, which takes the word in the emulator, and changed nothing
+on the unit (`T7 S0 W0 81DA640C/640CA17E` again, the same stray word as
+before), so on the unit the word is somewhere that bit does not
+report.  The sixth run (sha256 `5ada9dbe`) tried four ways of
+getting rid of it after its tests ("WHAT TAKES THE STRAY WORD"): only a
+one-word buffer transfer did (`M2 C0C07/0C06 640CA17E RIGHT`; nothing,
+a read of the data register and the interface's reset left
+`0CF7640C`), and the program now does that before every read (sha256
+`96bb4402`).  The seventh run with it: `M0` and `M2` right, `M1` and
+`M3` wrong, as the emulator has it; CMD18 / 4 in bursts 2074 KB/s with
+no block late and 256 of 4096 sectors wrong, / 3 in bursts 2753 KB/s,
+64 late, 256 wrong; polled, every command's first two blocks in time
+and the rest late (3968 of 4096).  Which 256, and how, is the next
+question (the program since, sha256 `cc673adb`, reports the bursts'
+bad sectors first, with where in a command they fall).  The eighth run
+answered part of it: in bursts (/ 4: 320 of 4096 wrong, none late)
+only a sector's **last word** is wrong (`T7 S512-3647 W127
+5DB9CD3D/5DB979D3`, `T8 S768-3647 W127 698B88B7/698BF087`), in sectors
+spread over the middle of the commands (5 first, 5 last of one); the
+wrong word is neither a neighbouring sector's word nor the block's
+CRC16.  The program since (sha256 `eef6f412`) counts the blocks whose
+last word a burst found not yet in the port (`X` on the `T` lines) and
+reads / 5 in bursts with the usual pause and with twice it.  The
+ninth run: / 5 in bursts right (1664 KB/s), with twice the pause 704
+wrong, and never a last word found missing: it is not the host
+reading too soon.  From the tenth run on `linkbench` sends everything
+as the arguments of CMD16s that the bridge logs (its "results through
+the card"), the first bad sector of each test whole among them: in
+bursts the bad sectors are whole commands of 64, in each of them every
+sector's last 16-bit word wrong and the rest right, in both buffers
+alike (moving the second from 0x5100 to 0x5200 changed nothing), the
+wrong word the same for a sector from run to run and neither the
+block's CRC16 nor any word near it.  The program since (sha256
+`2904084f`) reads the card processor's own copy of a bad command's
+last two words, to tell the way in from the way out.  The
+eleventh run: the card processor's copy is as wrong as the host's (16
+commands of 16), so the word goes wrong on the way in, between the
+bridge's DAT0 and the card processor's buffer; the same command at / 4
+and at / 3 got the same wrong words, so it is a function of the data
+and not of the moment.  The same with the 32 MB card in the first
+slot instead of the bridge: the stock way read it (352 KB/s, every
+word right), but `linkbench`'s own card start stopped at CMD2 twice
+(`OWN PROGRAM: STEP 7`), where the bridge goes through; so that card
+told nothing about CMD18 yet.  The start since (sha256 `83e6047f`)
+stores the interface's setting again before CMD2 as the stock driver
+does, tries a second time at the stock driver's 150 ms a step, and
+shows what each try got (CMD8's and CMD2's headers, ACMD41's rounds
+and OCR).  With it the 32 MB card still stopped at CMD2, and its OCR
+read `8000FF3F` where `80FF8000` was due.  Waiting about 1 ms before
+reading the answer (sha256 `62dc9f5b`) changed nothing, and ACMD41's
+raw words told why: `FF80 00FF 3F00`, round and round over the eight
+reads.  The response register gives the three words of a short answer
+over and over, from where the last read left off, also into the next
+answer; the program read eight of every one, so each answer started 8
+mod 3 = 2 words further on.  ACMD41's first answer happened to be read
+in place and said busy (`3F00 FF80 00FF`, OCR `00FF8000`); its second
+was read a word late, and the `80` that took the place of the busy bit
+made it ready.  CMD2 went to a card that had not finished its start.
+The bridge is ready at once, so its first answer was enough, and its
+CMD3 answer came out in place after the setting stored before CMD2
+(so that setting, or CMD2's long answer, puts the read position back:
+which of the two is not known).  The program since (sha256
+`6da038de`) reads 3 words of a short answer and 8 of a long one, as the
+stock program does; the emulator's response register goes round the
+same way, and with an old card that is busy for a few rounds the
+eight-read program gives exactly the unit's screen.  With
+it (2026-11-18) the card stopped one step earlier, at ACMD41 (`STEP 5`):
+its first round's answer was CMD55's (`3700 4001 204F`) and its second
+none.  The program had polled SDCTL bit 2 for the answer, which is
+still up from the last response for a moment after a command starts,
+and so took CMD55's answer for ACMD41's and started the next command
+over one still on the line.  The program since (sha256 `0b41ae3b`)
+waits for the response's interrupt as the stock program does: CMD55's
+came and ACMD41's did not (`A41 0`), because the interrupt comes when
+bit 2 goes up and it was still up from CMD55's.  The stock program
+starts each command by writing bits 0-2 back as it read them, and a 1
+takes bit 2 down (docs/hardware.md); the program since (sha256
+`def57680`) does that too.  From here on with the bridge carrying the program and the
+results (below, "Iterating with the bridge on the laptop's USB"), five
+builds in half an hour: ACMD41's answer raises no interrupt at all, and
+the wait now also ends on an error flag; CMD9 got no answer and is
+passed over; and with that **linkbench's own program started the 32 MB
+card and ran every test on it** (sha256 `74fd8fec`).  The card's
+multiple-block reads in bursts (`CMD18 /4 BURST`, `/5 BUR40`) had the
+bridge's fault exactly: the sector's last 16-bit word wrong and the
+rest right (`EE01C927` where `EE018223` was due), here in nearly every
+sector, not in whole commands; so it is not the bridge's doing but the
+card interface's, or the program's handling of it.  The polled ones lost
+words as with the bridge (late blocks), and single-block reads were
+right but every block late (51 KB/s, `T4095`), which the bridge never
+was.  A map of each test's first 128 sectors and of the headers
+of their blocks (later builds) showed where: **the first command of 64
+blocks came right every time, and every later one went wrong from its
+second block on**.  Its first block came in right but its transfer did
+not say it was done (the program waited for it 35 ms, `T`), the card
+went on sending, and from then on the program took blocks tens of
+sectors further on, from the middle of one (sector 65's place had
+sector 101's 241st 16-bit word on).  So it is the restart after CMD12,
+not the reading: **one CMD18 for the whole 2 MB came in without a
+wrong word, at 2036 KB/s** (`CMD18 /4 B ONE`, 2026-11-18).  Asking the
+card's status (CMD13) before each later command mended most of it (64
+bad sectors of 4096, one a command, with the last word wrong, and a
+block a command not done in time), a wait of 1 ms did nothing, and the
+card interface's reset left the stopped read's word in front of the
+next (as `docs/hardware.md` has it).  The last word that comes out as
+the block's CRC shifted is the same thing seen from the other side:
+the last word of a block after a restart is stored late.  For a link
+the answer is long reads: a CMD18 that runs as long as the stream does.
+Most of that was one thing, found the same afternoon: the response
+interrupt comes only when SDCTL bit 2 goes up, and nothing linkbench
+did took it down between commands (docs/hardware.md).  Reading the
+response register before each command until it is down (sha256
+`d3ed8fe0`): single-block reads 653 KB/s, 64-block CMD18s in bursts
+2007 KB/s with no wrong word at / 4, where they had been 51 KB/s and
+nearly every sector wrong.  What is left: now and then a whole command
+(1-7 of 64 at / 3 to / 5) whose every block has its last word stored
+late, the first symptom seen with the bridge; the state that decides
+it is set when the command begins and does not show in SDCTL.  That
+went too, the same evening: after each CMD12 the card interface reset
+and the stopped read's word taken by a one-word transfer
+(docs/hardware.md).  Since (sha256 `c2c65b59`), from the 32 MB card in
+SLOT 1: single-block reads 653 KB/s, CMD18 bursts of 64 blocks at / 3
+2626 KB/s, / 4 2007 KB/s, / 5 1618 KB/s, all without a wrong word, and
+one CMD18 for the whole 2 MB 2055 KB/s.  What is not clean is what is
+too fast for the host: polled CMD18s (1.5 MB/s off the port) and / 2
+in bursts.
+What stays a matter of speed: a polled host
+takes 1.5 MB/s off the port, less than the card gives at / 4 (2.1
+MB/s), so polled CMD18 blocks come before the program has a buffer for
+them ("late") and are lost; in bursts (3.1 MB/s) / 4 had no late block
+and / 3 (2.8 MB/s) few.
 
 ## The phone on the desk: `SDPHONE.UF2`
 

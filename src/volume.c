@@ -8,7 +8,8 @@
  *   97-160      the second
  *   161-192     the top directory, 512 entries
  *   193 on      clusters of 8 sectors (4 KiB) from number 2; the file
- *               is clusters 2 to 2049 */
+ *               is clusters 2 to 2049, LINKBENC.BIN from 2050 (28 at
+ *               most) */
 #define PART 32u
 #define PART_SECTORS (VOLUME_SECTORS - PART)
 #define PER_CLUSTER 8u
@@ -20,6 +21,22 @@
 #define DATA (ROOT + ROOT_ENTRIES * 32 / 512)
 #define FILE_CLUSTERS (VOLUME_FILE_BYTES / (PER_CLUSTER * 512))
 #define LAST_CLUSTER (2 + FILE_CLUSTERS - 1)
+#define PROG_FIRST (LAST_CLUSTER + 1)
+#define PROG_SECTOR (DATA + FILE_CLUSTERS * PER_CLUSTER)
+#define CLUSTER_BYTES (PER_CLUSTER * 512)
+
+uint8_t volume_program[VOLUME_PROGRAM_MAX];
+volatile uint32_t volume_program_bytes;
+
+static uint32_t program_clusters(void)
+{
+    return (volume_program_bytes + CLUSTER_BYTES - 1) / CLUSTER_BYTES;
+}
+
+uint32_t volume_program_sector(void)
+{
+    return PROG_SECTOR;
+}
 
 uint32_t volume_pattern(uint32_t j)
 {
@@ -111,6 +128,8 @@ static uint32_t fat_entry(uint32_t e)
         return 0xffff;
     if (e >= 2 && e < LAST_CLUSTER)
         return e + 1;
+    if (e >= PROG_FIRST && e < PROG_FIRST + program_clusters())
+        return e + 1 == PROG_FIRST + program_clusters() ? 0xffff : e + 1;
     return 0;
 }
 
@@ -133,6 +152,15 @@ static void root(uint32_t *w)
     put16(w, 32 + 16, (46 << 9) | (11 << 5) | 16);
     put16(w, 32 + 26, 2);
     put32(w, 32 + 28, VOLUME_FILE_BYTES);
+    if (volume_program_bytes) {
+        puts_(w, 64, "LINKBENCBIN", 11);
+        put8(w, 64 + 11, 0x01);
+        put16(w, 64 + 24, (46 << 9) | (11 << 5) | 18); /* 2026-11-18 */
+        put16(w, 64 + 18, (46 << 9) | (11 << 5) | 18);
+        put16(w, 64 + 16, (46 << 9) | (11 << 5) | 18);
+        put16(w, 64 + 26, PROG_FIRST);
+        put32(w, 64 + 28, volume_program_bytes);
+    }
 }
 
 void volume_sector(uint32_t n, uint32_t *w)
@@ -145,6 +173,12 @@ void volume_sector(uint32_t n, uint32_t *w)
                 w[i] = volume_pattern(at + i);
             return;
         }
+    }
+    if (n >= PROG_SECTOR && n < PROG_SECTOR + VOLUME_PROGRAM_MAX / 512) {
+        const uint8_t *b = volume_program + (n - PROG_SECTOR) * 512;
+        for (i = 0; i < 128; i++)
+            w[i] = (uint32_t)b[4 * i] << 24 | (uint32_t)b[4 * i + 1] << 16 | (uint32_t)b[4 * i + 2] << 8 | b[4 * i + 3];
+        return;
     }
     for (i = 0; i < 128; i++)
         w[i] = 0;

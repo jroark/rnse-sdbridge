@@ -88,14 +88,30 @@ at the card interface's rate as the model has it, one data line (8
 clocks a byte) at the divided clock, which a unit's interface may or may
 not match.  The emulator gives a read of the host port one cycle of the
 CPU (4 ns), so its host port figures mean nothing, and an unpaced burst
-there outruns the card processor (a word each of its cycles, 15 ns):
-the test builds the program with `-DBURST_PACE=8`, some 38 ns a read,
-against the 34 ns of the shortest read the 58.8 MHz bus can make.
-Whether a unit's host keeps up with the processor, or outruns it, in a
-burst, is one of the things the unit has to say.
+would outrun the card processor.  Since the run on the unit of
+2026-11-17 the card processor polls its status before each word it
+writes (a repeated move into the host port through a pointer lost
+words there), about 120 ns a word, and a burst read is paced to match
+(`BURST_PACE`, a pause of 20 turns of a loop before each read); what a
+burst still saves is the status read before each word.
 
-**On the unit, not yet run.**  `sdk/build.sh 192 linkbench`, the result
-on a card as a `.BIN` for `sdboot`, with `LINKTEST.BIN` beside it.  What
+**On the unit, 2026-11-16, against the RP2040 bridge in the first
+slot:** the stock way read 1 MB at 393 KB/s (3.1 Mbit/s), every word
+right ([sdbridge.md](sdbridge.md), "Seen on hardware").  The program's
+own tests did not run: its card processor program lost the words of
+the card's answers on the unit (it wrote them by a repeated move into
+the host port, which the emulator holds and a unit does not), so the
+card's start stopped after CMD0.  It now polls the port's status before
+each word (the run with the stock software is `tests/disc.rs`
+`link_benchmark_from_the_sd_loader`), and on 2026-11-17 it ran through
+against the bridge: **the host port carries 1.5 MB/s polled (12
+Mbit/s) and 3.1 MB/s in bursts (25 Mbit/s), CMD17 809 KB/s, every word
+right**; CMD18's blocks all came but their words were wrong, cause not
+yet known ([sdbridge.md](sdbridge.md), "Seen on hardware").  Even
+CMD17 alone carries more than the phone's whole stream measured on the
+Pico (up to 660 KB/s).  To run it: `sdk/build.sh 192 linkbench`, the result
+on a card as a `.BIN` for `sdboot`, with `LINKTEST.BIN` beside it (or
+the bridge in the other slot).  What
 to look for: CMD18's rate at each clock (the interface's real width and
 clock), whether "late" stays at 0 when polled (whether a host of this
 kind is fast enough for a stream), whether burst is clean, and errors in

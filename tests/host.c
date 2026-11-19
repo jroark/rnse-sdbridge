@@ -296,6 +296,54 @@ static void test_volume(void)
     }
 }
 
+/* LINKBENC.BIN: absent until one is sent, then in the directory with a
+ * chain of its own, its bytes as they were sent. */
+static int find_program(uint32_t root_start, uint32_t *cluster, uint32_t *size)
+{
+    int e;
+    read_sector(root_start);
+    for (e = 0; e < 512; e += 32)
+        if (memcmp(sec + e, "LINKBENCBIN", 11) == 0) {
+            *cluster = le16(sec + e + 26);
+            *size = le32(sec + e + 28);
+            return 1;
+        }
+    return 0;
+}
+
+static void test_program_file(void)
+{
+    const uint32_t fat_start = 33, root_start = 33 + 128;
+    uint32_t cluster = 0, size = 0, c, i, n = 9000;
+    CHECK(!find_program(root_start, &cluster, &size));
+    for (i = 0; i < n; i++)
+        volume_program[i] = (uint8_t)(i * 7 + 3);
+    volume_program_bytes = n;
+    CHECK(find_program(root_start, &cluster, &size) && size == n);
+    for (c = cluster, i = 1;; i++) {
+        uint32_t next;
+        read_sector(fat_start + c * 2 / 512);
+        next = le16(sec + (c * 2) % 512);
+        if (next >= 0xfff8)
+            break;
+        CHECK(next == c + 1);
+        c = next;
+        if (i > 100)
+            break;
+    }
+    CHECK(i == 3);                          /* 9000 bytes: 3 clusters of 4 KiB */
+    CHECK(volume_file_sector() + (cluster - 2) * 8 == volume_program_sector());
+    for (i = 0; i < n; i += 512) {
+        uint32_t k;
+        read_sector(volume_program_sector() + i / 512);
+        for (k = 0; k < 512 && i + k < n; k++)
+            CHECK(sec[k] == (uint8_t)((i + k) * 7 + 3));
+    }
+    volume_program_bytes = 0;
+    memset(volume_program, 0, n);
+    CHECK(!find_program(root_start, &cluster, &size));
+}
+
 static void test_aap(void)
 {
     static struct aap_reader r;
@@ -426,6 +474,7 @@ int main(int argc, char **argv)
     test_damaged();
     test_block();
     test_volume();
+    test_program_file();
     test_aap();
     printf(failures ? "sdbridge host tests: %d FAILED\n" : "sdbridge host tests: all passed\n", failures);
     return failures != 0;
