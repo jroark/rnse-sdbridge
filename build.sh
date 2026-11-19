@@ -16,8 +16,9 @@
 # SYS_KHZ=250000 for a faster processor clock (200 MHz by default).
 # AA_CERT=CERT.pem AA_KEY=KEY.pem (both outside the repository) builds
 # the handshake desk test too, SDHANDSHAKE.UF2, and the video stream's,
-# SDSTREAM.UF2 (docs/sdbridge.md); AA_MAX_UNACKED=N for the frames the
-# phone may send in SDSTREAM ahead of the acknowledgements (1).
+# SDSTREAM.UF2, and the bridge whole, SDLINK.UF2 (docs/sdbridge.md);
+# AA_MAX_UNACKED=N for the frames the phone may send ahead of the
+# acknowledgements (1).
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
 work=$here/work
@@ -83,9 +84,10 @@ for board in waveshare_rp2040_zero pico; do
         python3 -I "$here/uf2.py" "$build/sdhandshake.bin" "$dest/SDHANDSHAKE.UF2"
         python3 -I "$here/uf2.py" "$build/sdstream.bin" "$dest/SDSTREAM.UF2"
         python3 -I "$here/uf2.py" "$build/sdstreamdb.bin" "$dest/SDSTREAMDB.UF2"
-        arm-none-eabi-size "$build/sdstream.elf" "$build/sdhandshake.elf" | sed "s|$build/||"
+        python3 -I "$here/uf2.py" "$build/sdlink.bin" "$dest/SDLINK.UF2"
+        arm-none-eabi-size "$build/sdstream.elf" "$build/sdhandshake.elf" "$build/sdlink.elf" | sed "s|$build/||"
     else
-        rm -f "$dest/SDHANDSHAKE.UF2" "$dest/SDSTREAM.UF2" "$dest/SDSTREAMDB.UF2"
+        rm -f "$dest/SDHANDSHAKE.UF2" "$dest/SDSTREAM.UF2" "$dest/SDSTREAMDB.UF2" "$dest/SDLINK.UF2"
     fi
     cp "$build/sdbridge.elf" "$dest/sdbridge.elf"
     cp "$build/sdphone.elf" "$dest/sdphone.elf"

@@ -22,6 +22,13 @@
  * for AES-GCM, more for CBC with its MAC and padding): an encrypted
  * frame's payload can be that long. */
 #define AA_TLS_BUF (16384 + 512)
+/* What goes the other way: as much (the host test sends records of 16
+ * KiB), or less where the head unit sends only short messages and its
+ * handshake (SDLINK.UF2: 4 KiB, with MBEDTLS_SSL_OUT_CONTENT_LEN to
+ * match). */
+#ifndef AA_TLS_OUT_BUF
+#define AA_TLS_OUT_BUF AA_TLS_BUF
+#endif
 
 struct aa_tls {
     mbedtls_ssl_context ssl;
@@ -37,7 +44,7 @@ struct aa_tls {
      * mbedTLS has written that are still to be sent. */
     uint8_t in[AA_TLS_BUF];
     size_t in_len, in_pos;
-    uint8_t out[AA_TLS_BUF];
+    uint8_t out[AA_TLS_OUT_BUF];
     size_t out_len;
     int done;
 };
@@ -55,7 +62,7 @@ void aa_tls_free(struct aa_tls *t);
 
 /* A step of the handshake: the bytes of a handshake message from the
  * other side in (none for the client's first step), and in out (up to
- * AA_TLS_BUF) what to send back in one, *out_len of it (0: nothing).
+ * AA_TLS_OUT_BUF) what to send back in one, *out_len of it (0: nothing).
  * 1 the handshake is done, 0 it goes on, else mbedTLS's error. */
 int aa_tls_handshake(struct aa_tls *t, const uint8_t *in, size_t n, uint8_t *out, size_t *out_len);
 

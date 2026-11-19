@@ -87,4 +87,27 @@ if (AA_CERT_HEADER)
     pico_enable_stdio_uart(sdstreamdb 1)
     add_custom_command(TARGET sdstreamdb POST_BUILD
         COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:sdstreamdb> sdstreamdb.bin)
+    # The bridge whole (src/sdlink.c): the phone's video into the slot,
+    # SDLINK.UF2.  From flash (mbedTLS does not fit in RAM), the card's
+    # side in RAM (BRIDGE_RAM, and no jump tables or library calls made
+    # of its loops there); with smaller buffers than SDSTREAM's, for the
+    # ring of blocks for the 192 (LINK_BLOCKS).  No default alarm pool:
+    # its interrupt would be on core 0, the command line's.
+    add_executable(sdlink src/sdlink.c src/card.c src/volume.c src/crc.c src/aastream.c
+        src/aa_tls.c src/aa_hu.c src/aap.c src/aoa.c src/status.c)
+    pico_generate_pio_header(sdlink ${CMAKE_CURRENT_LIST_DIR}/src/sd.pio OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/link)
+    target_include_directories(sdlink PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src ${AA_CERT_DIR})
+    target_compile_options(sdlink PRIVATE -Wall -Wextra -O2)
+    # (Properties of the files, so SDBRIDGE's are built the same way.)
+    set_source_files_properties(src/card.c src/volume.c src/crc.c src/aastream.c
+        PROPERTIES COMPILE_OPTIONS "-fno-jump-tables;-fno-tree-loop-distribute-patterns")
+    target_compile_definitions(sdlink PRIVATE AOA_IN_SIZE=8192 AAP_MESSAGE_MAX=8192
+        AA_TLS_OUT_BUF=4096 MBEDTLS_SSL_OUT_CONTENT_LEN=4096 AA_MAX_UNACKED=${AA_MAX_UNACKED} VOLUME_PROGRAM_ROOM=512
+        "BRIDGE_RAM=__attribute__((section(\".time_critical.bridge\")))"
+        PICO_TIME_DEFAULT_ALARM_POOL_DISABLED=1)
+    target_link_libraries(sdlink pico_stdlib pico_multicore hardware_pio hardware_dma hardware_vreg tinyusb_host pico_mbedtls)
+    pico_enable_stdio_usb(sdlink 0)
+    pico_enable_stdio_uart(sdlink 1)
+    add_custom_command(TARGET sdlink POST_BUILD
+        COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:sdlink> sdlink.bin)
 endif()

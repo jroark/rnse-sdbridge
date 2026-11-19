@@ -194,7 +194,7 @@ static void upload(void)
         len = 0;
         {
             unsigned long w, ws;
-            if (sscanf(line, "PUT %lu %lx", &w, &ws) == 2 && w > 0 && w <= VOLUME_PROGRAM_MAX) {
+            if (sscanf(line, "PUT %lu %lx", &w, &ws) == 2 && w > 0 && w <= VOLUME_PROGRAM_ROOM) {
                 volume_program_bytes = 0;
                 want = (uint32_t)w;
                 want_sum = (uint32_t)ws;

@@ -4,6 +4,13 @@
 #define CRC_H
 #include <stdint.h>
 
+/* For SDLINK.UF2, which runs from flash: what the card side calls goes
+ * into RAM (the build defines BRIDGE_RAM), so that no flash read holds
+ * up an answer.  Nothing elsewhere. */
+#ifndef BRIDGE_RAM
+#define BRIDGE_RAM
+#endif
+
 void crc_init(void);
 /* The 7 bits of CRC7 over n bytes. */
 uint8_t crc7(const uint8_t *p, int n);

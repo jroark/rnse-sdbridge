@@ -162,12 +162,34 @@ int aa_hu_discovery(uint8_t *out, uint32_t cap)
     return b.err ? -1 : (int)b.len;
 }
 
-static void focus(struct aa_hu *h)
+static void focus_as(struct aa_hu *h, int mode)
 {
     struct aap_pb b;
     queue(h, AA_CH_VIDEO, 0, AA_VIDEO_FOCUS_INDICATION, &b);
-    aap_pb_varint(&b, 1, 1);  /* focused */
+    aap_pb_varint(&b, 1, (uint64_t)mode);  /* 1 focused (projected), 2 not (the head unit's own) */
     aap_pb_varint(&b, 2, 0);  /* not unrequested */
+    done(h, &b);
+}
+
+static void focus(struct aa_hu *h)
+{
+    focus_as(h, 1);
+}
+
+void aa_hu_ask_key_frame(struct aa_hu *h)
+{
+    LOG("asking for a key frame: video focus away and back\n");
+    focus_as(h, 2);
+    focus_as(h, 1);
+}
+
+void aa_hu_video_ack(struct aa_hu *h)
+{
+    struct aap_pb b;
+    h->v.acks++;
+    queue(h, AA_CH_VIDEO, 0, AA_AV_ACK, &b);
+    aap_pb_varint(&b, 1, (uint64_t)(int64_t)h->session);
+    aap_pb_varint(&b, 2, 1);
     done(h, &b);
 }
 
@@ -446,6 +468,8 @@ int aa_hu_media_frame(struct aa_hu *h, uint8_t channel, uint8_t flags, const uin
             v->messages++;
             if (len > v->largest)
                 v->largest = len;
+            if (h->defer_video_acks)
+                return 1;
             v->acks++;
         } else {
             h->audio_messages++;

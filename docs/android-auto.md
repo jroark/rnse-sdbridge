@@ -276,6 +276,12 @@ fast path for skipped macroblocks.
 
 ## Not yet done
 
+(2026-11-18: the whole path is written: the bridge with the phone's
+video in its card, `SDLINK.UF2`, and the viewer on the 192,
+`sdk/examples/aaviewer`; tested in the emulator, and on the unit the
+same evening it showed Google Maps from a phone, its colours off:
+docs/sdbridge.md, "The phone's video into the slot".)
+
 If decoding gets fast enough: sound
 through a card processor (PCM), TLS's cost, the Android Auto protocol
 tried on a Mac against a phone (certificate, cipher, margins, the bit

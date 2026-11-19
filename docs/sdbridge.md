@@ -736,11 +736,103 @@ setup, focus and start, a codec configuration (its profile and level
 read), a 40 KiB key frame over three frames with one acknowledgement
 after the last, an ordinary frame, focus again, a ping and audio focus.
 
+## The phone's video into the slot: `SDLINK.UF2`
+
+The two firmwares in one: the phone's side of `SDSTREAM.UF2` and the
+card of `SDBRIDGE.UF2` on the same board, the phone's pictures going
+from one to the other.  On the 192 `sdk/examples/aaviewer` reads them,
+decodes them (`third_party/h264bsd`) and shows them at half size.
+Built with the others when the build is given a certificate
+(`AA_CERT`, `AA_KEY`); best at `SYS_KHZ=250000`.
+
+**The format** (`sdk/examples/aaviewer/aalink.h`, kept there because
+the SH-4 compiler's container sees only `sdk/`): the card gets a file
+`AALINK.BIN` (32 MiB in one run of clusters, after `LINKBENC.BIN`'s
+room).  Its first sector says how things stand: where the stream's
+blocks begin and end, the last key frame, the codec's configuration
+(the H.264 parameter sets).  After eight such sectors comes a window
+onto the stream: block `seq` is window sector `seq % 65536`.  A block
+is a header (its number, flags, how far the bridge has blocks, a sum)
+and 492 bytes of a message, a message (the configuration, or a
+picture) starting a block of its own.  A block the bridge does not yet
+have reads as "not ready"; one it has reads the same every time until
+the 192 starts a read past it, which lets it go.  So a read that went
+wrong is made again, and nothing has to be said back to the bridge.
+
+**Pacing.**  A video message is acknowledged to the phone only when its
+last block has gone out to the 192 (`aa_hu` with `defer_video_acks`):
+with one message ahead of the acknowledgements, the phone sends no
+faster than the 192 decodes, and nothing is dropped.  The bridge keeps
+128 blocks (63 KB) in RAM; a key frame can be bigger, and goes through
+as the 192 reads it: when the ring has no room for another decrypted
+frame, the phone's bytes wait in USB (the log's "paused").  Sound is
+acknowledged and dropped.  A 192 that starts while the video is under
+way, with the last key frame gone, reads the second control sector,
+and the bridge then asks the phone for one by taking the video's focus
+away and giving it back (a guess at what makes a phone send one: not
+yet seen).
+
+**The board's two cores.**  Core 0 does the card's command line and
+nothing else, from RAM, with no interrupt enabled: it has 64 of the
+host's clocks to answer.  Core 1 runs USB, TLS and the session from
+flash, and the card's data side in two interrupts of higher priority:
+a new read from core 0 (the inter-core FIFO) and a block gone to the
+data state machine (DMA); each makes the next block (`volume_sector`,
+`aastream_sector`, the CRC) from RAM.  mbedTLS is too big for the whole
+firmware to run from RAM as `SDBRIDGE.UF2` does, so the card's code is
+put there by `BRIDGE_RAM` (with no jump tables or library calls made of
+its loops); `arm-none-eabi-size` in the build says what is left for
+mbedTLS's heap (about 61 KB with 128 blocks).
+
+**On the 192.**  `AAVIEW.BIN` (`sdk/examples/aaview`, in the SD loader's
+menu) loads `AAVIEWER.IMG` (`sdk/out/aaviewer-192.bin`, linked at
+0x8c010000 by its file `place`: the decoder makes it too big for the
+loader's place, and a `.BIN` of that size would be listed by the loader)
+and enters it, and is its way back, as `quakeboot` is for Quake.  The
+viewer looks for `AALINK.BIN` in either slot, through the installed
+software's card program if it is there and else through its own, then
+takes that slot over with `linkbench`'s program (`program.h`): CMD18 in
+runs of up to 32 blocks at the card interface's /4 clock, the words
+read in bursts, as `linkbench` found clean on a unit.  Each picture is
+decoded whole; once one has been read the next read starts at once, a
+single block, so that the bridge has its room back while the 192
+decodes.  The console has its counts every two seconds (frames a
+second, the link's KB/s, milliseconds decoding, showing and reading a
+frame, blocks read again).  The display key, CD EJECT and RETURN held
+work all the while.
+
+**Tested here** (2026-11-18): `sh sdbridge/tests/run.sh` (the ring:
+blocks, "not ready", the room, letting go, the window's numbers, the
+file in the volume; the session's held-back acknowledgements);
+`tests/aaviewer.rs` (no firmware: the bridge's card as its own code
+makes it, with `tests/data/margin.264` laid in as a phone's messages,
+read and decoded by the viewer on the emulated 192, every frame's
+CRC-32 as ffmpeg's); `tests/disc.rs` `android_auto_viewer_from_the_sd_loader`
+(the same started by the stock software and the SD loader, through
+`AAVIEW.BIN`, and back with RETURN held).  The emulated figures: 63 ms
+decoding and 39 ms showing a frame of that stream, 2 ms reading it.
+**On the unit** (2026-11-18, evening): the board with `SDLINK.UF2` in
+the second slot, the phone on its USB port, the viewer started from the
+loader's menu: **Google Maps from the phone on the 192's screen**
+(photo), the whole path working the first time.  Its colours were off:
+washed out, the map's light greys pale lilac with speckles of pink
+(the 3-3-2 palette and the colour conversion: next).  Not yet measured:
+the frames a second, and the board's log.
+
+**Running it.**  As for `SDSTREAM.UF2` (5 V into pin 40, the phone
+through an OTG adapter, the log on GP0 at 115200 baud: a USB-serial
+adapter or the Saleae), with the board's card end in the 192's second
+slot as for `SDBRIDGE.UF2` (only the ground joined), `AAVIEW.BIN` and
+`AAVIEWER.IMG` on a card in the first.  Start the viewer from the
+loader's menu, then plug the phone in.  The board's log has a line a
+second: the card's reads and KB/s, the phone's pictures a second, the
+ring, acknowledgements, pauses.
+
 ## Next
 
-Writes (CMD24 and CMD25) for the way back to the phone, and a mailbox
-of our own on top of reads and writes (sector addresses as channels);
-then the two firmwares in one, the phone's bytes carried through the
-slot, and the protocol itself (TLS and the channels) on the 192.  The RP2040's USB is full speed only
-(12 Mbit/s): whether a phone's Android Auto is content with that is the
-question of that step.
+Find out what the unit makes of it: the frames a second with a real
+phone's stream, whether the board answers in time with TLS running,
+and whether asking for a key frame works.  Then faster showing on the
+192 (a third of a frame's time), the touch screen (the knob as a
+pointer) and the way back to the phone (writes, CMD24/25), and sound
+through a card processor.

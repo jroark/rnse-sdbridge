@@ -20,7 +20,7 @@ void crc_init(void)
     }
 }
 
-uint8_t crc7(const uint8_t *p, int n)
+BRIDGE_RAM uint8_t crc7(const uint8_t *p, int n)
 {
     uint8_t c = 0;
     while (n--)
@@ -28,7 +28,7 @@ uint8_t crc7(const uint8_t *p, int n)
     return c >> 1;
 }
 
-uint16_t crc16_words(const uint32_t *w, int n)
+BRIDGE_RAM uint16_t crc16_words(const uint32_t *w, int n)
 {
     uint16_t c = 0;
     while (n--) {

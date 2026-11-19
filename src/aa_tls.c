@@ -133,10 +133,10 @@ int aa_tls_handshake(struct aa_tls *t, const uint8_t *in, size_t n, uint8_t *out
         t->done = 1;
     else if (r != MBEDTLS_ERR_SSL_WANT_READ && r != MBEDTLS_ERR_SSL_WANT_WRITE) {
         /* An alert of our own may still be worth sending. */
-        give(t, out, AA_TLS_BUF, out_len);
+        give(t, out, AA_TLS_OUT_BUF, out_len);
         return r;
     }
-    if ((r = give(t, out, AA_TLS_BUF, out_len)))
+    if ((r = give(t, out, AA_TLS_OUT_BUF, out_len)))
         return r;
     return t->done;
 }

@@ -12,6 +12,7 @@
 #include "../src/crc.h"
 #include "../src/volume.h"
 #include "../src/aap.h"
+#include "../src/aastream.h"
 
 static int failures;
 #define CHECK(c) do { if (!(c)) { printf("%s:%d: %s\n", __FILE__, __LINE__, #c); failures++; } } while (0)
@@ -448,9 +449,307 @@ static void test_aap(void)
     }
 }
 
+
+/* ---- the phone's video for the 192 (src/aastream.c, src/aalink.h) ---- */
+
+static uint32_t g32(const uint8_t *p)
+{
+    return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+}
+
+static uint32_t g16(const uint8_t *p)
+{
+    return (uint32_t)p[0] << 8 | p[1];
+}
+
+/* Window sector `seq` of a stream, as bytes. */
+static void link_sector(struct aastream *st, uint32_t index, uint8_t *b)
+{
+    uint32_t w[128];
+    int i;
+    aastream_sector(st, index, w);
+    for (i = 0; i < 512; i++)
+        b[i] = (uint8_t)(w[i / 4] >> (24 - 8 * (i % 4)));
+}
+
+/* A block read as the 192 reads it: its header checked, its payload
+ * appended to msg.  The flags, or -1 when the block is wrong. */
+static int take_block(struct aastream *st, uint32_t seq, uint8_t *msg, uint32_t *len)
+{
+    uint8_t b[512];
+    uint32_t sum = 0, i, used, flags;
+    link_sector(st, AALINK_CTL_SECTORS + seq % AALINK_WINDOW, b);
+    if (g32(b) != AALINK_BLOCK_MAGIC || g32(b + 4) != seq)
+        return -1;
+    flags = g16(b + 12);
+    if (!(flags & AALINK_READY))
+        return 0;
+    used = g16(b + 14);
+    for (i = 0; i < AALINK_PAYLOAD; i += 4)
+        sum += g32(b + AALINK_HEADER + i);
+    if (used > AALINK_PAYLOAD || sum != g32(b + 16))
+        return -1;
+    for (i = 0; i < used; i++)
+        msg[(*len)++] = b[AALINK_HEADER + i];
+    return (int)flags;
+}
+
+static uint8_t link_ring[16][512];
+
+static void test_aastream(void)
+{
+    static struct aastream st;
+    static uint8_t big[20000], got[20000];
+    uint8_t b[512];
+    const uint8_t config[] = { 0, 0, 0, 1, 0x67, 0x42, 0xc0, 0x1f, 0, 0, 0, 1, 0x68, 0xce, 0x3c, 0x80 };
+    uint32_t i, len, seq, room, taken, first;
+    int f;
+
+    aastream_init(&st, link_ring, 16);
+    CHECK(aastream_room(&st) == 16 * AALINK_PAYLOAD);
+    /* Nothing yet: block 0 is "not ready", and says where head is. */
+    len = 0;
+    CHECK(take_block(&st, 0, got, &len) == 0 && len == 0);
+
+    /* The configuration: one block, kept in the state sector too. */
+    CHECK(!aastream_is_key(config, sizeof config));
+    aastream_begin(&st, AALINK_CONFIG, 0);
+    CHECK(aastream_add(&st, config, sizeof config) == sizeof config);
+    CHECK(aastream_end(&st) == 0);
+    len = 0;
+    f = take_block(&st, 0, got, &len);
+    CHECK(f == (AALINK_READY | AALINK_START | AALINK_END | AALINK_CONFIG << 8));
+    CHECK(len == sizeof config && memcmp(got, config, len) == 0);
+    link_sector(&st, AALINK_CTL_STATE, b);
+    CHECK(g32(b) == AALINK_CTL_MAGIC && g32(b + AALINK_CTL_O_VERSION) == AALINK_VERSION);
+    CHECK(g32(b + AALINK_CTL_O_HEAD) == 1 && g32(b + AALINK_CTL_O_TAIL) == 0);
+    CHECK(g32(b + AALINK_CTL_O_KEY) == AALINK_NONE);
+    CHECK(g16(b + AALINK_CTL_O_CONFIG_LEN) == sizeof config && memcmp(b + AALINK_CTL_CONFIG, config, sizeof config) == 0);
+    CHECK(g16(b + AALINK_CTL_O_FLAGS) & AALINK_VIDEO);
+
+    /* A key frame over three blocks, the last one not full. */
+    for (i = 0; i < 1200; i++)
+        big[i] = (uint8_t)(i * 13 + 1);
+    big[0] = big[1] = big[2] = 0, big[3] = 1, big[4] = 0x65;
+    CHECK(aastream_is_key(big, 64));
+    aastream_begin(&st, AALINK_PICTURE, 1);
+    CHECK(aastream_add(&st, big, 700) == 700 && aastream_add(&st, big + 700, 500) == 500);
+    /* Until its end, the last block is not out: two of three are. */
+    CHECK(st.head == 3);
+    CHECK(aastream_end(&st) == 3);
+    len = 0;
+    f = take_block(&st, 1, got, &len);
+    CHECK(f == (AALINK_READY | AALINK_START | AALINK_KEY | AALINK_PICTURE << 8));
+    CHECK(take_block(&st, 2, got, &len) == AALINK_READY);
+    CHECK(take_block(&st, 3, got, &len) == (AALINK_READY | AALINK_END));
+    CHECK(len == 1200 && memcmp(got, big, 1200) == 0);
+    len = 0;
+    CHECK(take_block(&st, 4, got, &len) == 0);
+    link_sector(&st, AALINK_CTL_STATE, b);
+    CHECK(g32(b + AALINK_CTL_O_KEY) == 1 && g32(b + AALINK_CTL_O_MESSAGES) == 1);
+    /* A block's header says where head is when it is read. */
+    link_sector(&st, AALINK_CTL_SECTORS + 2, b);
+    CHECK(g32(b + 8) == 4);
+
+    /* Exactly a block's worth: one block, END on it. */
+    aastream_begin(&st, AALINK_PICTURE, 0);
+    CHECK(aastream_add(&st, big, AALINK_PAYLOAD) == AALINK_PAYLOAD);
+    CHECK(aastream_end(&st) == 4);
+    len = 0;
+    CHECK(take_block(&st, 4, got, &len) == (AALINK_READY | AALINK_START | AALINK_END | AALINK_PICTURE << 8));
+    CHECK(len == AALINK_PAYLOAD);
+
+    /* The ring fills: a long picture takes what there is room for. */
+    room = aastream_room(&st);
+    CHECK(room == (16 - 5) * AALINK_PAYLOAD);
+    for (i = 0; i < sizeof big; i++)
+        big[i] = (uint8_t)(i * 7 + i / 300);
+    aastream_begin(&st, AALINK_PICTURE, 0);
+    first = st.head;
+    taken = aastream_add(&st, big, sizeof big);
+    CHECK(taken == room && aastream_room(&st) == 0);
+    /* The 192 reads blocks 0-6 and starts its next read at 7: they go. */
+    aastream_consumed(&st, 7);
+    CHECK(st.tail == 7 && aastream_room(&st) == 7 * AALINK_PAYLOAD);
+    /* What went is "not ready" now; what is kept reads the same. */
+    len = 0;
+    CHECK(take_block(&st, 6, got, &len) == 0);
+    /* A read starting further back lets nothing come back. */
+    aastream_consumed(&st, 3);
+    CHECK(st.tail == 7);
+    while (taken < sizeof big) {
+        uint32_t k = aastream_add(&st, big + taken, sizeof big - taken);
+        taken += k;
+        if (taken < sizeof big) {
+            CHECK(k > 0 || st.head > st.tail);
+            aastream_consumed(&st, st.head);
+        }
+    }
+    seq = aastream_end(&st);
+    /* Read back from its first block, as far as it is still kept: here
+     * only the tail end, so read what is there and check its place. */
+    CHECK(seq == first + (sizeof big + AALINK_PAYLOAD - 1) / AALINK_PAYLOAD - 1);
+    len = 0;
+    for (i = st.tail; i <= seq; i++)
+        CHECK(take_block(&st, i, got, &len) & AALINK_READY);
+    CHECK(len == sizeof big - (st.tail - first) * AALINK_PAYLOAD);
+    CHECK(memcmp(got, big + (st.tail - first) * AALINK_PAYLOAD, len) == 0);
+
+    /* Sectors and numbers: the one nearest tail. */
+    st.tail = AALINK_WINDOW - 3;
+    CHECK(aastream_seq(&st, AALINK_WINDOW - 1) == AALINK_WINDOW - 1);
+    CHECK(aastream_seq(&st, 2) == AALINK_WINDOW + 2);
+    st.tail = 2 * AALINK_WINDOW + 5;
+    CHECK(aastream_seq(&st, 9) == 2 * AALINK_WINDOW + 9);
+    CHECK(aastream_seq(&st, AALINK_WINDOW - 2) == 2 * AALINK_WINDOW - 2);
+
+    /* Asking for a key frame: by reading the second control sector. */
+    aastream_init(&st, link_ring, 16);
+    link_sector(&st, AALINK_CTL_STATE, b);
+    CHECK(st.key_asked == 0);
+    link_sector(&st, AALINK_CTL_KEY, b);
+    CHECK(st.key_asked == 1 && g32(b) == AALINK_CTL_MAGIC);
+    /* Gone out: one past the last block sent whole. */
+    aastream_went_out(&st, 4);
+    aastream_went_out(&st, 2);
+    CHECK(st.sent == 5);
+}
+
+/* AALINK.BIN in the volume: in the directory when there is a stream, one
+ * run of clusters, its sectors the stream's. */
+static struct aastream vol_stream;
+static void vol_link(uint32_t index, uint32_t *w)
+{
+    aastream_sector(&vol_stream, index, w);
+}
+
+static void test_link_file(void)
+{
+    const uint32_t fat_start = 33, root_start = 33 + 128;
+    uint32_t cluster = 0, size = 0, c, i;
+    int e, found = 0;
+    aastream_init(&vol_stream, link_ring, 16);
+    read_sector(root_start);
+    for (e = 0; e < 512; e += 32)
+        CHECK(memcmp(sec + e, AALINK_NAME, 11) != 0);
+    volume_link = vol_link;
+    read_sector(root_start);
+    for (e = 0; e < 512; e += 32)
+        if (memcmp(sec + e, AALINK_NAME, 11) == 0) {
+            cluster = le16(sec + e + 26);
+            size = le32(sec + e + 28);
+            found = 1;
+        }
+    CHECK(found && size == AALINK_FILE_SECTORS * 512u);
+    /* With no LINKBENC.BIN, right after LINKTEST.BIN: no empty entry
+     * before it, where a directory would end for sdk/src/sd.c. */
+    CHECK(memcmp(sec + 64, AALINK_NAME, 11) == 0);
+    for (c = cluster, i = 1;; i++) {
+        uint32_t next;
+        read_sector(fat_start + c * 2 / 512);
+        next = le16(sec + (c * 2) % 512);
+        if (next >= 0xfff8)
+            break;
+        CHECK(next == c + 1);
+        if (next != c + 1)
+            break;
+        c = next;
+    }
+    CHECK(i * 8 >= AALINK_FILE_SECTORS && (i - 1) * 8 < AALINK_FILE_SECTORS);
+    CHECK(volume_file_sector() + (cluster - 2) * 8 == volume_link_sector());
+    CHECK(volume_link_sector() + AALINK_FILE_SECTORS <= VOLUME_SECTORS);
+    /* Its first sector: the state. */
+    read_sector(volume_link_sector());
+    CHECK(g32(sec) == AALINK_CTL_MAGIC);
+    /* Nothing of it overlaps LINKBENC.BIN's room. */
+    CHECK(volume_link_sector() >= volume_program_sector() + VOLUME_PROGRAM_MAX / 512);
+    volume_link = 0;
+}
+
+/* sdbridge/tests/host IMAGE STREAM.264: the card with AALINK.BIN whose
+ * stream holds the H.264 file as a phone would send it, its parameter
+ * sets as a configuration message and each picture as one (for
+ * tests/aaviewer.rs): as if the 192 had not yet read any of it. */
+static int write_image(const char *path, const char *h264)
+{
+    static struct aastream st;
+    FILE *f = fopen(h264, "rb"), *out;
+    uint8_t *data, *ring, b[512];
+    long n;
+    uint32_t i, start, w[128], blocks;
+    int in_config = -1;
+    if (!f || fseek(f, 0, SEEK_END) || (n = ftell(f)) <= 0 || fseek(f, 0, SEEK_SET))
+        return 2;
+    data = malloc((size_t)n);
+    if (!data || fread(data, 1, (size_t)n, f) != (size_t)n)
+        return 2;
+    fclose(f);
+    /* Room for all of it: nothing is read before the image is written. */
+    blocks = (uint32_t)n / AALINK_PAYLOAD + (uint32_t)n / 100 + 64;
+    ring = malloc((size_t)blocks * 512);
+    if (!ring)
+        return 2;
+    aastream_init(&st, ring, blocks);
+    st.state = AALINK_PHONE | AALINK_VIDEO;
+    st.width = 800;
+    st.height = 480;
+    /* NAL units by their start codes (three bytes, or four: from the
+     * first zero): 7 and 8 make the configuration, a slice (1, 5) ends a
+     * picture with whatever came before it. */
+    start = 0;
+    for (i = 0; i + 3 <= (uint32_t)n;) {
+        uint32_t next, type;
+        if (!(data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1)) {
+            i++;
+            continue;
+        }
+        type = data[i + 3] & 0x1f;
+        for (next = i + 3; next + 3 <= (uint32_t)n; next++)
+            if (data[next] == 0 && data[next + 1] == 0 && data[next + 2] == 1)
+                break;
+        if (next + 3 > (uint32_t)n)
+            next = (uint32_t)n;
+        else if (data[next - 1] == 0)
+            next--;
+        if (type == 7 || type == 8) {
+            if (in_config != 1) {
+                aastream_begin(&st, AALINK_CONFIG, 0);
+                in_config = 1;
+            }
+            aastream_add(&st, data + start, next - start);
+            start = next;
+        } else if (type == 1 || type == 5) {
+            if (in_config == 1)
+                aastream_end(&st);
+            in_config = 0;
+            aastream_begin(&st, AALINK_PICTURE, type == 5);
+            aastream_add(&st, data + start, next - start);
+            aastream_end(&st);
+            start = next;
+        }
+        i = next;
+    }
+    vol_stream = st;
+    volume_link = vol_link;
+    out = fopen(path, "wb");
+    if (!out)
+        return 2;
+    for (i = 0; i < VOLUME_SECTORS; i++) {
+        int k;
+        volume_sector(i, w);
+        for (k = 0; k < 512; k++)
+            b[k] = (uint8_t)(w[k / 4] >> (24 - 8 * (k % 4)));
+        fwrite(b, 1, 512, out);
+    }
+    printf("%s: %u blocks, %u pictures, key frame at %u\n", path, (unsigned)st.head, (unsigned)st.messages, (unsigned)st.key);
+    return fclose(out) ? 2 : 0;
+}
+
 int main(int argc, char **argv)
 {
     card_reset(&card);
+    if (argc == 3)
+        return write_image(argv[1], argv[2]);
     /* sdbridge/tests/host IMAGE: the whole card into a file (for
      * tests/linkbench.rs). */
     if (argc == 2) {
@@ -476,6 +775,8 @@ int main(int argc, char **argv)
     test_volume();
     test_program_file();
     test_aap();
+    test_aastream();
+    test_link_file();
     printf(failures ? "sdbridge host tests: %d FAILED\n" : "sdbridge host tests: all passed\n", failures);
     return failures != 0;
 }

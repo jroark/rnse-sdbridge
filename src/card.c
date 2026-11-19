@@ -68,7 +68,7 @@ static void registers(void)
     card_csd[15] = (uint8_t)(crc7(card_csd, 15) << 1 | 1);
 }
 
-void card_reset(struct card *c)
+BRIDGE_RAM void card_reset(struct card *c)
 {
     static int done;
     if (!done) {
@@ -83,7 +83,7 @@ void card_reset(struct card *c)
     c->errors = 0;
 }
 
-void card_frame(uint32_t w0, uint32_t w1, uint8_t *cmd)
+BRIDGE_RAM void card_frame(uint32_t w0, uint32_t w1, uint8_t *cmd)
 {
     cmd[0] = (uint8_t)(w0 >> 25);
     cmd[1] = (uint8_t)(w0 >> 17);
@@ -94,7 +94,7 @@ void card_frame(uint32_t w0, uint32_t w1, uint8_t *cmd)
 }
 
 /* Bytes into the response words. */
-static void pack(struct reply *r, const uint8_t *b, int n)
+BRIDGE_RAM static void pack(struct reply *r, const uint8_t *b, int n)
 {
     int i;
     r->words[0] = (uint32_t)(8 * n - 1);
@@ -105,7 +105,7 @@ static void pack(struct reply *r, const uint8_t *b, int n)
     r->nwords = 1 + (n + 3) / 4;
 }
 
-static void short_response(struct reply *r, uint8_t index, uint32_t v, int crc)
+BRIDGE_RAM static void short_response(struct reply *r, uint8_t index, uint32_t v, int crc)
 {
     uint8_t b[6];
     b[0] = index & 0x3f;
@@ -117,7 +117,7 @@ static void short_response(struct reply *r, uint8_t index, uint32_t v, int crc)
     pack(r, b, 6);
 }
 
-static void long_response(struct reply *r, const uint8_t *reg)
+BRIDGE_RAM static void long_response(struct reply *r, const uint8_t *reg)
 {
     uint8_t b[17];
     int i;
@@ -129,19 +129,19 @@ static void long_response(struct reply *r, const uint8_t *reg)
 
 /* R1: the errors so far (cleared by being said) and the state the
  * command found. */
-static void r1(struct card *c, struct reply *r, uint8_t index, int state, uint32_t more)
+BRIDGE_RAM static void r1(struct card *c, struct reply *r, uint8_t index, int state, uint32_t more)
 {
     uint32_t s = c->errors | more | (uint32_t)state << 9 | (state == TRAN ? READY_FOR_DATA : 0) | (c->app ? APP_CMD : 0);
     c->errors = 0;
     short_response(r, index, s, 1);
 }
 
-static int addressed(const struct card *c, uint32_t arg)
+BRIDGE_RAM static int addressed(const struct card *c, uint32_t arg)
 {
     return (arg >> 16) == c->rca;
 }
 
-void card_command(struct card *c, const uint8_t *cmd, struct reply *r)
+BRIDGE_RAM void card_command(struct card *c, const uint8_t *cmd, struct reply *r)
 {
     uint8_t index = cmd[0] & 0x3f;
     uint32_t arg = (uint32_t)cmd[1] << 24 | (uint32_t)cmd[2] << 16 | (uint32_t)cmd[3] << 8 | cmd[4];
@@ -312,7 +312,7 @@ plain:
     c->illegal++;
 }
 
-void card_block(const uint32_t *sector, uint32_t *out)
+BRIDGE_RAM void card_block(const uint32_t *sector, uint32_t *out)
 {
     int i;
     out[0] = 4096 + 16 - 1;

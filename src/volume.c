@@ -1,4 +1,5 @@
 #include "volume.h"
+#include "aalink.h"
 
 /* The layout, in sectors from the card's start:
  *
@@ -9,7 +10,7 @@
  *   161-192     the top directory, 512 entries
  *   193 on      clusters of 8 sectors (4 KiB) from number 2; the file
  *               is clusters 2 to 2049, LINKBENC.BIN from 2050 (28 at
- *               most) */
+ *               most), AALINK.BIN from 2078 (8193 clusters) */
 #define PART 32u
 #define PART_SECTORS (VOLUME_SECTORS - PART)
 #define PER_CLUSTER 8u
@@ -24,11 +25,20 @@
 #define PROG_FIRST (LAST_CLUSTER + 1)
 #define PROG_SECTOR (DATA + FILE_CLUSTERS * PER_CLUSTER)
 #define CLUSTER_BYTES (PER_CLUSTER * 512)
+#define LINK_FIRST (PROG_FIRST + VOLUME_PROGRAM_MAX / CLUSTER_BYTES)
+#define LINK_CLUSTERS ((AALINK_FILE_SECTORS + PER_CLUSTER - 1) / PER_CLUSTER)
+#define LINK_SECTOR (DATA + (LINK_FIRST - 2) * PER_CLUSTER)
 
-uint8_t volume_program[VOLUME_PROGRAM_MAX];
+uint8_t volume_program[VOLUME_PROGRAM_ROOM];
 volatile uint32_t volume_program_bytes;
+void (*volume_link)(uint32_t index, uint32_t *words);
 
-static uint32_t program_clusters(void)
+uint32_t volume_link_sector(void)
+{
+    return LINK_SECTOR;
+}
+
+BRIDGE_RAM static uint32_t program_clusters(void)
 {
     return (volume_program_bytes + CLUSTER_BYTES - 1) / CLUSTER_BYTES;
 }
@@ -53,32 +63,32 @@ uint32_t volume_file_sector(void)
 }
 
 /* Bytes into the big-endian words, at byte offset `at`. */
-static void put8(uint32_t *w, uint32_t at, uint32_t v)
+BRIDGE_RAM static void put8(uint32_t *w, uint32_t at, uint32_t v)
 {
     uint32_t shift = 24 - 8 * (at & 3);
     w[at >> 2] = (w[at >> 2] & ~(0xffu << shift)) | (v & 0xff) << shift;
 }
 
-static void put16(uint32_t *w, uint32_t at, uint32_t v)
+BRIDGE_RAM static void put16(uint32_t *w, uint32_t at, uint32_t v)
 {
     put8(w, at, v);
     put8(w, at + 1, v >> 8);
 }
 
-static void put32(uint32_t *w, uint32_t at, uint32_t v)
+BRIDGE_RAM static void put32(uint32_t *w, uint32_t at, uint32_t v)
 {
     put16(w, at, v);
     put16(w, at + 2, v >> 16);
 }
 
-static void puts_(uint32_t *w, uint32_t at, const char *s, int n)
+BRIDGE_RAM static void puts_(uint32_t *w, uint32_t at, const char *s, int n)
 {
     int i;
     for (i = 0; i < n; i++)
         put8(w, at + (uint32_t)i, (uint8_t)s[i]);
 }
 
-static void mbr(uint32_t *w)
+BRIDGE_RAM static void mbr(uint32_t *w)
 {
     put8(w, 446 + 0, 0x00);
     /* CHS fields as a formatter writes them for an LBA partition. */
@@ -94,7 +104,7 @@ static void mbr(uint32_t *w)
     put16(w, 510, 0xaa55);
 }
 
-static void boot(uint32_t *w)
+BRIDGE_RAM static void boot(uint32_t *w)
 {
     put8(w, 0, 0xeb);
     put8(w, 1, 0x3c);
@@ -120,7 +130,7 @@ static void boot(uint32_t *w)
     put16(w, 510, 0xaa55);
 }
 
-static uint32_t fat_entry(uint32_t e)
+BRIDGE_RAM static uint32_t fat_entry(uint32_t e)
 {
     if (e == 0)
         return 0xfff8;
@@ -130,40 +140,50 @@ static uint32_t fat_entry(uint32_t e)
         return e + 1;
     if (e >= PROG_FIRST && e < PROG_FIRST + program_clusters())
         return e + 1 == PROG_FIRST + program_clusters() ? 0xffff : e + 1;
+    if (volume_link && e >= LINK_FIRST && e < LINK_FIRST + LINK_CLUSTERS)
+        return e + 1 == LINK_FIRST + LINK_CLUSTERS ? 0xffff : e + 1;
     return 0;
 }
 
-static void fat(uint32_t *w, uint32_t k)
+BRIDGE_RAM static void fat(uint32_t *w, uint32_t k)
 {
     uint32_t i;
     for (i = 0; i < 256; i++)
         put16(w, 2 * i, fat_entry(k * 256 + i));
 }
 
-static void root(uint32_t *w)
+/* A file's entry of the top directory, read only, dated. */
+BRIDGE_RAM static void entry(uint32_t *w, uint32_t at, const char *name, uint32_t cluster, uint32_t size, uint32_t day)
 {
-    puts_(w, 0, "LINKBENCH  ", 11);
-    put8(w, 11, 0x08);                    /* the volume's label */
-    puts_(w, 32, "LINKTESTBIN", 11);
-    put8(w, 32 + 11, 0x01);               /* read only */
-    put16(w, 32 + 22, 0);                 /* 00:00 */
-    put16(w, 32 + 24, (46 << 9) | (11 << 5) | 16); /* 2026-11-16 */
-    put16(w, 32 + 18, (46 << 9) | (11 << 5) | 16);
-    put16(w, 32 + 16, (46 << 9) | (11 << 5) | 16);
-    put16(w, 32 + 26, 2);
-    put32(w, 32 + 28, VOLUME_FILE_BYTES);
-    if (volume_program_bytes) {
-        puts_(w, 64, "LINKBENCBIN", 11);
-        put8(w, 64 + 11, 0x01);
-        put16(w, 64 + 24, (46 << 9) | (11 << 5) | 18); /* 2026-11-18 */
-        put16(w, 64 + 18, (46 << 9) | (11 << 5) | 18);
-        put16(w, 64 + 16, (46 << 9) | (11 << 5) | 18);
-        put16(w, 64 + 26, PROG_FIRST);
-        put32(w, 64 + 28, volume_program_bytes);
-    }
+    uint32_t date = (46 << 9) | (11 << 5) | day;          /* 2026-11 */
+    puts_(w, at, name, 11);
+    put8(w, at + 11, 0x01);
+    put16(w, at + 22, 0);                                 /* 00:00 */
+    put16(w, at + 24, date);
+    put16(w, at + 18, date);
+    put16(w, at + 16, date);
+    put16(w, at + 26, cluster);
+    put32(w, at + 28, size);
 }
 
-void volume_sector(uint32_t n, uint32_t *w)
+/* The entries one after another: a directory ends at the first empty
+ * one (sdk/src/sd.c reads no further, as DOS does not). */
+BRIDGE_RAM static void root(uint32_t *w)
+{
+    uint32_t at = 32;
+    puts_(w, 0, "LINKBENCH  ", 11);
+    put8(w, 11, 0x08);                    /* the volume's label */
+    entry(w, at, "LINKTESTBIN", 2, VOLUME_FILE_BYTES, 16);
+    at += 32;
+    if (volume_program_bytes) {
+        entry(w, at, "LINKBENCBIN", PROG_FIRST, volume_program_bytes, 18);
+        at += 32;
+    }
+    if (volume_link)
+        entry(w, at, AALINK_NAME, LINK_FIRST, AALINK_FILE_SECTORS * 512u, 18);
+}
+
+BRIDGE_RAM void volume_sector(uint32_t n, uint32_t *w)
 {
     uint32_t i;
     if (n >= DATA) {
@@ -174,7 +194,11 @@ void volume_sector(uint32_t n, uint32_t *w)
             return;
         }
     }
-    if (n >= PROG_SECTOR && n < PROG_SECTOR + VOLUME_PROGRAM_MAX / 512) {
+    if (volume_link && n >= LINK_SECTOR && n < LINK_SECTOR + AALINK_FILE_SECTORS) {
+        volume_link(n - LINK_SECTOR, w);
+        return;
+    }
+    if (n >= PROG_SECTOR && n < PROG_SECTOR + VOLUME_PROGRAM_ROOM / 512) {
         const uint8_t *b = volume_program + (n - PROG_SECTOR) * 512;
         for (i = 0; i < 128; i++)
             w[i] = (uint32_t)b[4 * i] << 24 | (uint32_t)b[4 * i + 1] << 16 | (uint32_t)b[4 * i + 2] << 8 | b[4 * i + 3];

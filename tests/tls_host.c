@@ -468,6 +468,19 @@ static void session(void)
     video[14] = 0x41;
     phone_sends(AA_CH_VIDEO, 0, video, 3000, 1);
     CHECK(nanswers == 1 && session_hu.v.messages == 3 && session_hu.v.idr == 1);
+    /* As SDLINK.UF2 has it: no acknowledgement with the last frame, one
+     * when the caller says (the 192 has read the picture). */
+    session_hu.defer_video_acks = 1;
+    phone_sends(AA_CH_VIDEO, 0, video, 3000, 2);
+    CHECK(nanswers == 0 && session_hu.v.messages == 4 && session_hu.v.acks == 3);
+    aa_hu_video_ack(&session_hu);
+    CHECK(session_hu.nout == 1 && session_hu.v.acks == 4);
+    session_hu.nout = 0;
+    session_hu.defer_video_acks = 0;
+    /* A key frame asked for: the focus away and back, in that order. */
+    aa_hu_ask_key_frame(&session_hu);
+    CHECK(session_hu.nout == 2 && session_hu.out[0].channel == AA_CH_VIDEO && session_hu.out[1].channel == AA_CH_VIDEO);
+    session_hu.nout = 0;
 
     /* Sound on the media channel: set up, started, a message of PCM over
      * two frames, acknowledged with its own session. */
@@ -485,7 +498,7 @@ static void session(void)
     phone_sends(AA_CH_MEDIA_AUDIO, 0, video, 8192, 2);
     CHECK(nanswers == 1 && answers[0].channel == AA_CH_MEDIA_AUDIO && answers[0].id == AA_AV_ACK &&
           answer_field(&answers[0], 1) == 3);
-    CHECK(session_hu.audio_messages == 1 && session_hu.audio_bytes == 8192 && session_hu.v.messages == 3);
+    CHECK(session_hu.audio_messages == 1 && session_hu.audio_bytes == 8192 && session_hu.v.messages == 4);
     /* The microphone opened: answered. */
     aap_pb_init(&b, m, sizeof m);
     aap_pb_id(&b, AA_AV_INPUT_OPEN_REQUEST);

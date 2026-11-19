@@ -9,6 +9,13 @@
 #define CARD_H
 #include <stdint.h>
 
+/* For SDLINK.UF2, which runs from flash: what the card side calls goes
+ * into RAM (the build defines BRIDGE_RAM), so that no flash read holds
+ * up an answer.  Nothing elsewhere. */
+#ifndef BRIDGE_RAM
+#define BRIDGE_RAM
+#endif
+
 enum { IDLE, READY, IDENT, STBY, TRAN, DATA };
 
 struct card {

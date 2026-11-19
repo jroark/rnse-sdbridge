@@ -12,7 +12,7 @@ set -e
 here=$(cd "$(dirname "$0")" && pwd)
 src=$here/../src
 mkdir -p "$here/../work"
-${CC:-cc} -O2 -Wall -Wextra -o "$here/../work/host" "$here/host.c" "$src/card.c" "$src/volume.c" "$src/crc.c" "$src/aap.c"
+${CC:-cc} -O2 -Wall -Wextra -o "$here/../work/host" "$here/host.c" "$src/card.c" "$src/volume.c" "$src/crc.c" "$src/aap.c" "$src/aastream.c"
 "$here/../work/host"
 # TLS inside Android Auto's frames (tests/tls_host.c), on the pico-sdk's
 # mbedTLS (sdbridge/build.sh fetches it) and certificates made here, for

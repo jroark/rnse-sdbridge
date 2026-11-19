@@ -85,6 +85,10 @@ struct aa_hu_video {
 #define AA_HU_QUEUE 8
 struct aa_hu {
     int max_unacked;
+    /* Set: a video message is not acknowledged when its last frame comes
+     * but when the caller says (aa_hu_video_ack): SDLINK.UF2, once the
+     * 192 has read it. */
+    int defer_video_acks;
     int quiet;             /* no log */
     int session;           /* the video session, from its start indication */
     int video_started;
@@ -123,6 +127,15 @@ int aa_hu_message(struct aa_hu *h, uint8_t channel, uint8_t flags, const uint8_t
 int aa_hu_media_frame(struct aa_hu *h, uint8_t channel, uint8_t flags, const uint8_t *p, uint32_t n);
 /* 1 for the channels that carry media (video and sound). */
 int aa_hu_media_channel(uint8_t channel);
+
+/* The acknowledgement of a video message, into out (defer_video_acks). */
+void aa_hu_video_ack(struct aa_hu *h);
+/* A key frame asked for: the video's focus taken away and given back,
+ * after which a phone starts its stream anew, the codec's configuration
+ * and a key frame first (as a head unit does when it shows its own
+ * screen for a while: a guess at what makes a phone send one, not
+ * measured). */
+void aa_hu_ask_key_frame(struct aa_hu *h);
 
 /* The service discovery response, id first: its length, or -1. */
 int aa_hu_discovery(uint8_t *out, uint32_t cap);
