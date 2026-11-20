@@ -8,14 +8,15 @@
 //! repository), and an SH-4 GCC on the PATH (the kit's
 //! `tools/sh4-docker` has one in a container); without either they
 //! return early and pass, which proves nothing.  The kit is `RNSE_SDK`,
-//! or rnse's `sdk/` beside this directory.  The helpers are copies of
+//! or a checkout of rnse-sdk beside this
+//! repository (`../rnse-sdk`).  The helpers are copies of
 //! rnse's `tests/disc.rs`, taking a program of this repository by path.
 
 use rnse::fw;
 use rnse::machine::Machine;
 use rnse::sh4::cpu::Stop;
 
-/// The kit: RNSE_SDK, or rnse's sdk/ beside this directory.
+/// The kit: RNSE_SDK, or ../rnse-sdk.
 fn kit() -> std::path::PathBuf {
     std::env::var_os("RNSE_SDK").map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../rnse-sdk"))

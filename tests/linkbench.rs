@@ -26,7 +26,7 @@ fn build() -> Option<Vec<u8>> {
         return program.clone();
     }
     let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    // The kit: RNSE_SDK, or rnse's sdk/ beside this directory.
+    // The kit: RNSE_SDK, or ../rnse-sdk.
     let sdk = std::env::var_os("RNSE_SDK").map(std::path::PathBuf::from).unwrap_or_else(|| here.join("../rnse-sdk"));
     let make = |extra: &str| std::process::Command::new("sh").arg(sdk.join("build.sh")).arg("192").arg(here.join("linkbench"))
         .env("EXTRA_CFLAGS", extra).output();
