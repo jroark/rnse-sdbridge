@@ -32,6 +32,31 @@ fn build() -> Option<Vec<u8>> {
     program
 }
 
+/// The viewer built for the 193 (-DAA_CRC), once for the tests here.
+fn build_193() -> Option<Vec<u8>> {
+    static BUILT: std::sync::Mutex<Option<Option<Vec<u8>>>> = std::sync::Mutex::new(None);
+    let mut built = BUILT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(program) = built.as_ref() {
+        return program.clone();
+    }
+    let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let sdk = std::env::var_os("RNSE_SDK").map(std::path::PathBuf::from).unwrap_or_else(|| here.join("../rnse-sdk"));
+    let program = (|| {
+        let out = std::process::Command::new("sh").arg(sdk.join("build.sh")).arg("193").arg(here.join("aaviewer"))
+            .env("EXTRA_CFLAGS", "-DAA_CRC").output().ok()?;
+        if !out.status.success() {
+            let text = String::from_utf8_lossy(&out.stderr);
+            assert!(text.contains("gcc: not found") || text.contains("gcc: command not found"), "build: {}", text);
+            return None;
+        }
+        let program = std::fs::read(sdk.join("out/aaviewer-193.bin")).unwrap();
+        let _ = std::process::Command::new("sh").arg(sdk.join("build.sh")).arg("193").arg(here.join("aaviewer")).output();
+        Some(program)
+    })();
+    *built = Some(program.clone());
+    program
+}
+
 fn build_once() -> Option<Vec<u8>> {
     let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     // The kit: RNSE_SDK, or ../rnse-sdk.
@@ -284,3 +309,114 @@ fn viewer_plays_the_phone_s_sound() {
     assert!((lpeak * 2 - peak).abs() < peak / 20, "left {} right {}", lpeak, peak);
 }
 
+
+/// The viewer on an emulated 193 where sdload193 would start it, the
+/// bridge's card at select 0 (the unit's slot 2).
+fn start_193(program: &[u8], card: Vec<u8>) -> Machine {
+    let mut m = Machine::for_model(Model::Rnse193);
+    m.echo_console = std::env::var_os("RNSE_LINK_ECHO").is_some();
+    m.scramble_ram();
+    m.install_boot_stub("V575");
+    m.board.load(0x09b6_0080, program);
+    m.cpu.reset();
+    m.cpu.set_sr(0x7000_00f0);
+    m.cpu.pc = u32::from_be_bytes([program[0], program[1], program[2], program[3]]);
+    m.cpu.r[15] = 0x09c5_fff0;
+    m.watchdog_always = true;
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    m
+}
+
+/// The 193: the same stream from the bridge's card in the slot its
+/// software calls SD2 (the unit's physical slot 2), read through the
+/// chip's SD host (CMD18), every picture decoded and shown whole; each
+/// frame's CRC-32 as ffmpeg's.  The viewer is started in the loader's
+/// place, as rnse-sdk's examples/sdload193 starts RNSE.BIN.
+#[test]
+fn viewer_decodes_the_bridge_s_stream_on_the_193() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let Some(program) = build_193() else { return };
+    let Some(card) = card(&root.join("tests/data/margin.264")) else { return };
+    let want: Vec<String> = std::fs::read_to_string(root.join("tests/data/margin.crc")).unwrap()
+        .lines().map(|l| l.trim().to_ascii_lowercase()).filter(|l| !l.is_empty()).collect();
+
+    let mut m = start_193(&program, card);
+
+    let ms = m.cycles_per_ms();
+    let crcs = |m: &Machine| -> Vec<String> {
+        console(m).lines().filter_map(|l| l.strip_prefix("aaviewer: frame "))
+            .filter_map(|l| l.split(" crc ").nth(1)).map(|c| c.trim().to_ascii_lowercase()).collect()
+    };
+    for _ in 0..600 {
+        if crcs(&m).len() >= want.len() {
+            break;
+        }
+        assert_eq!(m.run(100 * ms), Stop::Budget, "{:?}: {}", m.cpu.fault, console(&m));
+    }
+    let text = console(&m);
+    println!("{}", text);
+    if let Some(path) = std::env::var_os("RNSE_AAVIEWER_SHOT_193") {
+        let (w, h, rgb) = m.render();
+        std::fs::write(path, rnse::png::encode_rgb(w, h, &rgb)).unwrap();
+    }
+    assert!(text.contains("BRIDGE IN SLOT 2"), "{}", text);
+    let got = crcs(&m);
+    assert_eq!(got.len(), want.len(), "{}", text);
+    for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+        assert_eq!(g.trim_start_matches('0'), w.trim_start_matches('0'), "frame {}: {}", i, text);
+    }
+}
+
+/// The keys on the 193: the knob and SELECT go to the phone as on the
+/// 192, CD EJECT ejects the disc (the drive's port as the stock software
+/// left it), and RETURN held says there is no loader to go back to and
+/// the viewer goes on.
+#[test]
+fn viewer_keys_on_the_193() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let Some(program) = build_193() else { return };
+    let Some(card) = card(&root.join("tests/data/margin.264")) else { return };
+    let mut m = start_193(&program, card);
+    let ms = m.cycles_per_ms();
+    for _ in 0..200 {
+        if console(&m).contains("aaviewer: frame 11 ") {
+            break;
+        }
+        assert_eq!(m.run(100 * ms), Stop::Budget, "{:?}: {}", m.cpu.fault, console(&m));
+    }
+    let at = m.console.len();
+    assert!(m.panel_knob("main", 2));
+    assert_eq!(m.run(300 * ms), Stop::Budget);
+    assert!(m.panel_key("SELECT", true));
+    assert_eq!(m.run(300 * ms), Stop::Budget);
+    assert!(m.panel_key("SELECT", false));
+    assert_eq!(m.run(300 * ms), Stop::Budget);
+    let text = String::from_utf8_lossy(&m.console[at..]).into_owned();
+    let what: Vec<u32> = text.lines().filter_map(|l| l.strip_prefix("aaviewer: input "))
+        .map(|c| u32::from_str_radix(c.trim(), 16).unwrap() & 0x3ff).collect();
+    let knob: i32 = what.iter().filter(|w| *w & 0x300 == 0x100).map(|w| (*w & 0xff) as u8 as i8 as i32).sum();
+    let keys: Vec<u32> = what.iter().copied().filter(|w| w & 0x300 == 0).collect();
+    assert_eq!(knob, 2, "{}", text);
+    assert_eq!(keys, vec![6 << 1 | 1, 6 << 1], "{}", text);
+
+    // A disc in the drive (any data: the eject is what is looked at).
+    m.atapi().insert(Some(vec![0u8; 64 * 2048]));
+    assert_eq!(m.run(500 * ms), Stop::Budget);
+    let before = m.atapi().ejects;
+    assert!(m.panel_key("CD_EJECT", true));
+    assert_eq!(m.run(500 * ms), Stop::Budget);
+    assert!(m.panel_key("CD_EJECT", false));
+    assert_eq!(m.run(500 * ms), Stop::Budget);
+    let ejects = m.atapi().ejects;
+    assert_eq!(ejects, before + 1, "{}", console(&m));
+
+    assert!(m.panel_key("RETURN", true));
+    assert_eq!(m.run(2500 * ms), Stop::Budget);
+    assert!(m.panel_key("RETURN", false));
+    assert_eq!(m.run(500 * ms), Stop::Budget, "{:?}: {}", m.cpu.fault, console(&m));
+    assert!(console(&m).contains("RETURN: NO LOADER TO GO BACK TO"), "{}", console(&m));
+    // Still reading: the report goes on.
+    let at = m.console.len();
+    assert_eq!(m.run(2500 * ms), Stop::Budget);
+    assert!(String::from_utf8_lossy(&m.console[at..]).contains(" fps x10"), "{}", console(&m));
+}

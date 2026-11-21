@@ -42,7 +42,14 @@
  * work, and RETURN held for two seconds goes back to the SD loader (the
  * bridge's card processor back into reset, the caches as they were).
  *
- * The 192 only. */
+ * On the 193 (8P0/8J0 035 193) the same program runs without a first
+ * stage: the SD loader (rnse-sdk examples/sdload193) starts it from a
+ * card as RNSE.BIN, its place being 1 MiB there.  The bridge is read
+ * through the chip's own SD host (the kit's sdhi_read_multi: CMD18, some
+ * 2.9 MB/s from the bridge on a unit), the picture is shown whole, 800
+ * by 480, through the same palette, and there is no sound yet (the 193
+ * plays through its serial sound interface, not through a card
+ * processor).  ON_193 below says which. */
 #include "rnse.h"
 #include "h264bsd_decoder.h"
 #include "aalink.h"
@@ -63,6 +70,13 @@ static const u32 ports[2] = { 0xb5000002, 0xb500004a };
  * aaview (in the loader's place, 0x8df00000). */
 #define HEAP 0x0c800000
 #define HEAP_END 0x0dcf0000
+/* On the 193: RAM from 0x08000000 to 0x0fffffff, the picture at
+ * 0x08110000, the loader's place 0x09b60000 and the stock loader packed
+ * after it up to some 0x09e40000: the decoder above all that. */
+#define HEAP_193 0x0a000000
+#define HEAP_END_193 0x0c000000
+
+#define ON_193 (screen_width != 400)
 
 #define RUN 64                       /* blocks a read at most: 32 KB */
 /* The pictures read and not yet decoded, and their room: the phone
@@ -140,6 +154,48 @@ static void line(const char *text)
     screen_text(2, y, text, WHITE, 1);
     if (++row >= 23)
         row = 0;
+}
+
+/* On the 193, records on CAN 0x7F8 for the bench, which has no
+ * console (the debug port is not wired): the format of rnse-sdk's
+ * bench programs (test, item, 32-bit value, 16-bit second), sent
+ * through the stock software's set-up of the controller, mailbox 1, as
+ * they do.  Nothing on the 192.
+ *   0xd0 0  started; 0xd0 1 the bridge found: value its first sector,
+ *           second the slot (1 = the unit's slot 1, 2 = slot 2)
+ *   0xd3 s  slot s (as on the screen) did not do: value the code
+ *   0xd4 0  long RETURN with no loader
+ *   0xd5 n  every 2 s: n = 0 value frames, second fps x10; 1 value KB/s,
+ *           second ms decoding a frame; 2 value ms showing, second ms
+ *           reading; 3 value blocks read again, second missing; 4 value
+ *           skipped pictures, second inputs sent */
+#define CAN193 0xffdf0000
+#define CAN193_MB1 (CAN193 + 0x100 + 0x20)
+
+static void say(u8 test, u8 item, u32 value, u32 second)
+{
+    u8 d[8] = { test, item, (u8)(value >> 24), (u8)(value >> 16), (u8)(value >> 8), (u8)value, (u8)(second >> 8), (u8)second };
+    u32 n;
+    int i;
+    if (screen_width == 400)
+        return;
+    REG16(CAN193_MB1 + 0x00) = (u16)(0x7f8 << 2);
+    for (i = 0; i < 8; i++)
+        REG8(CAN193_MB1 + 0x08 + i) = d[i];
+    REG16(CAN193_MB1 + 0x10) = 8;
+    REG32(CAN193 + 0x20) = 0x00000002;
+    for (n = 0; n < 400000; n++)
+        if (REG16(CAN193 + 0x32) & 0x0002)
+            break;
+    if (REG16(CAN193 + 0x32) & 0x0002) {
+        REG16(CAN193 + 0x32) = 0x0002;
+        return;
+    }
+    REG32(CAN193 + 0x28) = 0x00000002;
+    for (n = 0; n < 400000; n++)
+        if (!(REG16(CAN193 + 0x22) & 0x0002) || (REG16(CAN193 + 0x3a) & 0x0002))
+            break;
+    REG16(CAN193 + 0x3a) = 0x0002;
 }
 
 /* Called while the program waits (main sets it: the sound fed). */
@@ -246,9 +302,36 @@ static void palette(void)
  * events). */
 static void (*show_idle)(void) = panel_service;
 
+/* The 193: the whole picture, a line at a time through the kit's
+ * screen_blit, each pixel its own luma and its 2 x 2 block's chroma. */
+static u8 show_line[800];
+
+static void show_193(const u8 *pic, u32 w, u32 h)
+{
+    const u8 *cb = pic + w * h, *cr = cb + w * h / 4;
+    u32 x, y, lines = h < (u32)screen_height ? h : (u32)screen_height;
+    u32 cols = w < (u32)screen_width ? w : (u32)screen_width;
+    if (cols > sizeof show_line)
+        cols = sizeof show_line;
+    for (y = 0; y < lines; y++) {
+        const u8 *py = pic + y * w, *pb = cb + (y / 2) * (w / 2), *pr = cr + (y / 2) * (w / 2);
+        if (!(y % 24))
+            show_idle();
+        for (x = 0; x < cols; x += 2) {
+            show_line[x] = PIXEL(py[x], pb[x / 2], pr[x / 2]);
+            show_line[x + 1] = PIXEL(py[x + 1], pb[x / 2], pr[x / 2]);
+        }
+        screen_blit(0, (int)y, (int)cols, 1, show_line, (int)cols);
+    }
+}
+
 /* Every other pixel of every other line, as examples/h264bench shows. */
 static void show(const u8 *pic, u32 w, u32 h)
 {
+    if (ON_193) {
+        show_193(pic, w, h);
+        return;
+    }
     const u8 *cb = pic + w * h, *cr = cb + w * h / 4;
     u32 x, y, lines = (u32)screen_height < h / 2 ? (u32)screen_height : h / 2, cols = w / 2 > 400 ? 400 : w / 2;
     for (y = 0; y < lines; y++) {
@@ -333,6 +416,8 @@ static int done_word(void)
 
 static void dsp_reset(void)
 {
+    if (ON_193)
+        return; /* no card processor */
     if (slot >= 0)
         REG32(LATCH) &= ~(4u << slot);
 }
@@ -520,6 +605,19 @@ static int read_run(u32 sector, u32 n, u8 *to)
     u32 a = address(sector), i;
     u16 h, late;
     int b;
+    if (ON_193) {
+        /* The chip's SD host: blocks before a failure are good; the
+         * failed one and those after it are read again. */
+        int r = sdhi_read_multi(sector, n, to);
+        if (r == -1 || r == -2 || r == -4)
+            return r == -4 ? 0 : -1;
+        for (i = 0; i < n; i++) {
+            block_ok[i] = r == 0 || i < (u32)(-r - 0x100);
+            if (!block_ok[i])
+                missing_blocks++;
+        }
+        return 0;
+    }
     if (put(7) || put((u16)(a >> 16)) || put((u16)a) || put((u16)n))
         return -1;
     for (i = 0; i < n; i++) {
@@ -543,6 +641,8 @@ static int read_one(u32 sector, void *buf)
     static u16 bounce[256];
     u32 a = address(sector), step = high_capacity ? 1 : 512;
     int h;
+    if (ON_193)
+        return sdhi_read(sector, buf) ? -1 : 0;
     if (dead)
         return -1;
     if (put(6) || put((u16)(a >> 16)) || put((u16)a) || put((u16)(step >> 16)) || put((u16)step) || put(1))
@@ -624,6 +724,8 @@ static void sound_put(int type, const u8 *p, u32 n)
 {
     struct source *f = &sources[type - AALINK_SOUND_MEDIA];
     u32 k, frames = n / (2 * f->channels);
+    if (ON_193)
+        return;
     for (k = 0; k < frames; k++) {
         s16 *at;
         if (f->in - f->out >= f->frames - 1) {
@@ -642,6 +744,8 @@ static void sound_put(int type, const u8 *p, u32 n)
 /* The frames of sound the media FIFO has room for. */
 static u32 sound_room(void)
 {
+    if (ON_193)
+        return 0x7fffffff; /* no sound there yet: reads never wait for it */
     return sources[0].frames - 1 - (sources[0].in - sources[0].out);
 }
 
@@ -714,6 +818,8 @@ static void sound_start(void)
 {
     int dsp = slot ^ 1;
     u32 k;
+    if (ON_193)
+        return;
     for (k = 0; k < 3; k++) {
         sources[k].in = sources[k].out = sources[k].frac = 0;
         sources[k].playing = 0;
@@ -744,12 +850,14 @@ static void leave(void)
     sound_stop();
     sd_reader = 0;
     dsp_reset();
-    cache_setup(found_ccr);
+    if (!ON_193)
+        cache_setup(found_ccr);
 }
 
 /* What a slot said, for the screen: SLOT n: then the words. */
 static void slot_says(int s, const char *what, int r)
 {
+    say(0xd3, (u8)(s + 1), (u32)r, 0);
     char text[96], *q = put_str(text, "SLOT ");
     q = put_dec(q, (u32)s + 1);
     q = put_str(q, ": ");
@@ -770,6 +878,26 @@ static void slot_says(int s, const char *what, int r)
 static int open_bridge(void)
 {
     int s, r, order[2] = { 1, 0 };
+    if (ON_193) {
+        /* The chip's SD host, select 0 (the unit's slot 2) first: there
+         * the bridge goes when this program is on a card in slot 1. */
+        for (s = 0; s < 2; s++) {
+            sd_reader = 0;
+            r = sd_init(s);
+            if (r) {
+                slot_says(s == 0 ? 1 : 0, "NO CARD THAT STARTS", r);
+                continue;
+            }
+            if (find_link()) {
+                slot = s == 0 ? 1 : 0; /* the 192's numbering: 1 is SLOT 2 */
+                return 0;
+            }
+            slot_says(s == 0 ? 1 : 0, "NO AALINK.BIN", 0);
+        }
+        line("NO BRIDGE (AALINK.BIN) IN EITHER SLOT");
+        slot = -1;
+        return -1;
+    }
     for (int k = 0; k < 2; k++) {
         s = order[k];
         if (!sd_present(s))
@@ -1011,6 +1139,13 @@ static void inputs(void)
     if (panel_return_short()) {
         send_input(AALINK_KEY_BACK << 1 | 1);
         send_input(AALINK_KEY_BACK << 1);
+    }
+    /* Held with no loader to go back to (the 193's SD loader is on the
+     * disc and starts this as an ordinary program): said, and the
+     * viewer goes on, CD EJECT working as before. */
+    if (panel_return_held()) {
+        say(0xd4, 0, 0, 0);
+        line("RETURN: NO LOADER TO GO BACK TO (CD EJECT, OR SWITCH OFF)");
     }
 }
 
@@ -1263,8 +1398,21 @@ static void report(void)
     last_report = now;
 }
 #else
+/* On the 193 the numbers on CAN (say); nothing on the 192. */
 static void report(void)
 {
+    u32 now = millis(), dt = now - last_report;
+    static u32 last_frames, last_bytes;
+    if (screen_width == 400 || dt < 2000)
+        return;
+    say(0xd5, 0, frames, (frames - last_frames) * 10000 / dt);
+    say(0xd5, 1, (bytes_in - last_bytes) / dt, frames ? decode_us / 1000 / frames : 0);
+    say(0xd5, 2, frames ? show_us / 1000 / frames : 0, frames ? read_us / 1000 / frames : 0);
+    say(0xd5, 3, again, missing_blocks);
+    say(0xd5, 4, skipped, inputs_sent);
+    last_frames = frames;
+    last_bytes = bytes_in;
+    last_report = now;
 }
 #endif
 
@@ -1321,13 +1469,10 @@ int main(void)
 
     board_init();
     console_puts("\nrnse sdk: aaviewer\n");
+    say(0xd0, 0, 0, 0);
     screen_palette(BLACK, 0, 0, 0);
     screen_palette(WHITE, 255, 255, 255);
     screen_fill(0, 0, screen_width, screen_height, BLACK);
-    if (screen_width != 400) {
-        console_puts("the 192 only\n");
-        return 1;
-    }
     tables();
 #ifdef AA_CRC
     crc_init();
@@ -1335,17 +1480,17 @@ int main(void)
     found_ccr = REG32(CCR);
     /* The faceplate controller as aaview (and sdboot before it) left it,
      * lit; started otherwise (a test), it is started here. */
-    if (h->magic[0] == AA_MAGIC0 && h->magic[1] == AA_MAGIC1)
+    if (!ON_193 && h->magic[0] == AA_MAGIC0 && h->magic[1] == AA_MAGIC1)
         panel_attach();
     else
         panel_init();
     sd_idle = panel_service;
     display_idle = panel_service;
     loader_leave = leave;
-    if (h->magic[0] == AA_MAGIC0 && h->magic[1] == AA_MAGIC1 && h->loader_return)
+    if (!ON_193 && h->magic[0] == AA_MAGIC0 && h->magic[1] == AA_MAGIC1 && h->loader_return)
         loader_return_via = h->loader_return;
     line("RNSE SDK: AAVIEWER 1");
-    line("HOLD RETURN 2 S: BACK TO THE LOADER");
+    line(loader_active() ? "HOLD RETURN 2 S: BACK TO THE LOADER" : "CD EJECT WORKS; NO LOADER TO RETURN TO");
     if (REG32(MMUCR) & 1) {
         line("ADDRESSES ARE TRANSLATED (MMUCR.AT): NOT RUN");
         for (;;)
@@ -1353,7 +1498,10 @@ int main(void)
     }
     /* The decoder's memory through P0; the caches as measured fastest
      * on a unit (examples/h264bench: copy-back, no index modes). */
-    heap_init((void *)HEAP, HEAP_END - HEAP);
+    if (ON_193)
+        heap_init((void *)HEAP_193, HEAP_END_193 - HEAP_193);
+    else
+        heap_init((void *)HEAP, HEAP_END - HEAP);
     h264bsdTimer = micros;
     h264bsdFastCopy = 1;
     /* The faceplate served every few milliseconds while a picture is
@@ -1377,13 +1525,16 @@ int main(void)
         for (;;)
             pause(1000);
     }
-    cache_setup(CCR_EMODE | CCR_ICE | CCR_OCE | CCR_CB);
+    /* (The 193's SH-4A keeps its caches as its software left them.) */
+    if (!ON_193)
+        cache_setup(CCR_EMODE | CCR_ICE | CCR_OCE | CCR_CB);
 
     for (;;) {
         while (open_bridge()) {
             line("LOOKING AGAIN IN 3 S");
             pause(3000);
         }
+        say(0xd0, 1, link_first, (u32)slot + 1);
         {
             char text[96], *q = put_str(text, "BRIDGE IN SLOT ");
             q = put_dec(q, (u32)slot + 1);
