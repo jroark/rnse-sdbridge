@@ -56,7 +56,7 @@ RNSE_DISC=$PWD/disc.iso cargo test --release --test disc -- --nocapture
 ## Layout
 
 - `src/`: the RP2040 firmwares (`main.c` the card, `card.c`, `volume.c`; `sdphone.c`, `aap.c`; `sdhandshake.c`, `aa_tls.c`; `sdlink.c`, `aastream.c`), `CMakeLists.txt`, `build.sh`, `patches/` (TinyUSB), `link.py`, `uf2.py`, `pem2c.py`.
-- `linkbench/`, `h264bench/`, `aaview/`, `aaviewer/` (`aalink.h` is the format of `AALINK.BIN`; its file `place` links it outside the loader's place): the 192's programs; `third_party/h264bsd` (a `libs` entry of h264bench and aaviewer).
+- `linkbench/`, `h264bench/`, `aaview/`, `aaviewer/` (`aalink.h` is the format of `AALINK.BIN`; its file `place` links it outside the 192's loader place): the 192's programs; `aaviewer/` runs on the 193 too (`docs/android-auto.md`, "The 193"); `third_party/h264bsd` (a `libs` entry of h264bench and aaviewer).
 - `tests/`: `run.sh`, `host.c`, `tls_host.c`, `piosim.py`; the emulator tests (crate `rnse-sdbridge`; `rnse` pinned in `Cargo.toml` and `Cargo.lock`); `data/margin.*` (synthetic H.264 frames made by `tools/aa-streams.sh`, and ffmpeg's CRCs of them). `tools/linktest.py` checks the link test's words.
 
 A `docs/....md` named in a comment that is not in this repository is in rnse (`docs/hardware.md`, "SD card processors", is the one that matters here) or, for the kit's own (`docs/custom-firmware.md`, `docs/sd-loader.md`), in rnse-sdk; `sdk/src/...` is the kit's `src/...`.
