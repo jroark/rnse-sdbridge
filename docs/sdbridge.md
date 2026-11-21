@@ -801,8 +801,9 @@ comes in as the same keys: its seek up and down as NEXT and PREV, its
 volume keys as the volume knob.  Tested in the emulator
 (`viewer_follows_the_steering_wheel`); the wheel's codes themselves were
 seen on a unit with the stock software, the viewer with them not yet.
-On the 192 only for now: on the 193 the kit's CAN start (`can_init`)
-left the bus silent, so the viewer does not start the car driver there.
+On the 193 too, since kit v0.4.0, whose car driver takes the CAN
+controller as the stock software left it (`can_attach`; the kit's
+`can_init` left the bench 193's bus silent).
 
 **Sound.**  The phone's sound goes through the same stream: its media
 channel (48 kHz stereo), its navigation voice and its own sounds (16 kHz

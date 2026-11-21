@@ -27,7 +27,7 @@ jobs:
           repository: jroark/rnse-sdk
           # v0.3.0: the 193's SD host and 16-bit picture (aaviewer on
           # the 193).
-          ref: v0.3.0
+          ref: v0.4.0
           path: rnse-sdk
       - name: SH-4 cross compiler
         run: sudo apt-get update && sudo apt-get install -y gcc-sh4-linux-gnu binutils-sh4-linux-gnu

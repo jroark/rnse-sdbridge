@@ -291,6 +291,91 @@ fn viewer_follows_the_steering_wheel() {
     assert_eq!(m.radio.volume, volume + 2, "{}", text);
 }
 
+/// The steering wheel on the 193: the kit's car driver takes the CAN
+/// controller as the stock software left it (can_attach), and seek up
+/// and down go to the phone as NEXT and PREV, the volume keys turn the
+/// unit's volume.
+#[test]
+fn viewer_follows_the_steering_wheel_on_the_193() {
+    use rnse::dev::hcan::Frame;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let Some(program) = build_193() else { return };
+    let Some(card) = card_with_sound(&root.join("tests/data/margin.264"), 8000) else { return };
+    let mut m = start_193(&program, card);
+    // As the stock software leaves it: running, at its bit timing.
+    m.can().start();
+    let ms = m.cycles_per_ms();
+    for _ in 0..200 {
+        if console(&m).contains("aaviewer: frame 11 ") {
+            break;
+        }
+        assert_eq!(m.run(100 * ms), Stop::Budget, "{:?}: {}", m.cpu.fault, console(&m));
+    }
+    let at = m.console.len();
+    let volume = m.radio.volume;
+    for code in [0x04u8, 0x00, 0x05, 0x00, 0x06, 0x00, 0x06, 0x00] {
+        m.can_send_cyclic(Frame::new(0x5c3, &[0x39, code]), 100);
+        assert_eq!(m.run(300 * ms), Stop::Budget, "{:?}: {}", m.cpu.fault, console(&m));
+    }
+    assert_eq!(m.run(500 * ms), Stop::Budget);
+    let text = String::from_utf8_lossy(&m.console[at..]).into_owned();
+    let keys: Vec<u32> = text.lines().filter_map(|l| l.strip_prefix("aaviewer: input "))
+        .map(|c| u32::from_str_radix(c.trim(), 16).unwrap() & 0x3ff).filter(|w| w & 0x300 == 0).collect();
+    assert_eq!(keys, vec![8 << 1 | 1, 8 << 1, 9 << 1 | 1, 9 << 1], "{}", text);
+    assert_eq!(m.radio.volume, volume + 2, "{}", text);
+    // And the report counts the wheel's changes (on the bench, CAN 0xd7).
+    let wheel: Vec<u32> = console(&m).lines().filter_map(|l| l.split("; wheel ").nth(1)).filter_map(|n| n.trim().parse().ok()).collect();
+    assert!(wheel.last().is_some_and(|&n| n > 0), "{:?}", wheel);
+}
+
+/// The phone's sound on the 193: the same 1 kHz tone (the left at half
+/// the right's level) through the chip's own sound interface (the kit's
+/// pcm_stream there), the amplifier on the decoder's input at the volume
+/// the knob sets, without a break.
+#[test]
+fn viewer_plays_the_phone_s_sound_on_the_193() {
+    use rnse::dev::radio::Radio;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let Some(program) = build_193() else { return };
+    let Some(card) = card_with_sound(&root.join("tests/data/margin.264"), 3000) else { return };
+    let mut m = start_193(&program, card);
+    m.speaker = Some(Vec::new());
+    let ms = m.cycles_per_ms();
+    for _ in 0..60 {
+        if console(&m).contains("BRIDGE IN SLOT") {
+            break;
+        }
+        assert_eq!(m.run(100 * ms), Stop::Budget, "{:?}: {}", m.cpu.fault, console(&m));
+    }
+    assert!(m.panel_knob("volume", 18));
+    for _ in 0..60 {
+        assert_eq!(m.run(100 * ms), Stop::Budget, "{:?}: {}", m.cpu.fault, console(&m));
+    }
+    assert_eq!(m.radio.volume, 30, "the volume knob");
+    let text = console(&m);
+    assert!(text.contains("aaviewer: frame 11 "), "{}", text);
+    assert_eq!(m.radio.source, Radio::SOURCE_DECODER, "{}", text);
+    let heard = m.speaker.take().unwrap();
+    let right: Vec<i16> = heard.iter().skip(1).step_by(2).copied().collect();
+    let left: Vec<i16> = heard.iter().step_by(2).copied().collect();
+    let from = right.iter().position(|v| v.abs() > 8000).unwrap_or_else(|| panic!("no tone heard ({} samples): {}", right.len(), text));
+    let tone = &right[from..(from + 110_250).min(right.len())];
+    assert!(tone.len() >= 88_200, "only {} samples of the tone: {}", tone.len(), text);
+    let pitches: Vec<u32> = tone.chunks(22_050).map(|c| 2 * c.windows(2).filter(|w| w[0] < 0 && w[1] >= 0).count() as u32).collect();
+    for p in &pitches[..pitches.len() - 1] {
+        assert!(p.abs_diff(1000) <= 8, "1 kHz each half second: {:?}", pitches);
+    }
+    let peak = tone.iter().map(|v| i32::from(*v).abs()).max().unwrap();
+    let largest = tone.windows(2).map(|w| (i32::from(w[1]) - i32::from(w[0])).abs()).max().unwrap();
+    let slope = (1.2 * 2.0 * std::f64::consts::PI * 1000.0 / 44_100.0 * f64::from(peak)) as i32;
+    assert!(peak > 15_000 && largest <= slope + 2, "a step of {} where the sine of {} has at most {}", largest, peak, slope);
+    let lpeak = left[from..from + tone.len()].iter().map(|v| i32::from(*v).abs()).max().unwrap();
+    assert!((lpeak * 2 - peak).abs() < peak / 20, "left {} right {}", lpeak, peak);
+    // The report: no gap in the sound (on the bench, CAN 0xd6).
+    let gaps: Vec<u32> = text.lines().filter_map(|l| l.split(" gaps ").nth(1)).filter_map(|n| n.split(';').next()?.trim().parse().ok()).collect();
+    assert!(!gaps.is_empty() && gaps.iter().all(|&g| g == 0), "gaps: {:?}", gaps);
+}
+
 /// The phone's sound: a 1 kHz tone (48 kHz stereo, the left at half the
 /// right's level) in the stream between the pictures, played by the
 /// other card processor at 44.1 kHz through the amplifier's decoder
