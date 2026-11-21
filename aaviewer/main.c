@@ -1069,7 +1069,8 @@ static int read_blocks(u32 want)
  * BACK (held, the way back to the loader, as everywhere); NAV home, MEDIA
  * play/pause, NEXT and PREV the tracks, the four keys at the screen's
  * corners up, down, right and left.  The display key and CD EJECT stay
- * the unit's (panel_service). */
+ * the unit's (panel_service).  The steering wheel's seek keys arrive as
+ * NEXT and PREV and its volume keys as the volume knob (car_init). */
 static const struct {
     u8 key, aa;
 } key_map[] = {
@@ -1484,6 +1485,15 @@ int main(void)
         panel_attach();
     else
         panel_init();
+    /* The car (the kit's src/car.c): served by panel_service, it puts
+     * the steering wheel's keys among the faceplate's, so that seek
+     * up/down are NEXT/PREV for the phone and the wheel's volume keys
+     * turn the volume knob (inputs, below).  Not on the 193 yet: the
+     * kit's car_init starts CAN with can_init, which left the bench
+     * 193's bus silent, and the viewer's reports (say) go through the
+     * controller as the stock software left it. */
+    if (!ON_193)
+        car_init();
     sd_idle = panel_service;
     display_idle = panel_service;
     loader_leave = leave;

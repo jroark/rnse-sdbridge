@@ -258,6 +258,39 @@ fn viewer_sends_the_knob_and_keys() {
     assert_eq!(keys, vec![6 << 1 | 1, 6 << 1, 1 << 1 | 1, 1 << 1], "{}", text);
 }
 
+/// The steering wheel (the kit's car driver, CAN 0x5C3 `39 KK`): seek
+/// up and down go to the phone as NEXT and PREV, the volume keys turn
+/// the unit's volume as the knob does.
+#[test]
+fn viewer_follows_the_steering_wheel() {
+    use rnse::dev::hcan::Frame;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let Some(program) = build() else { return };
+    let Some(card) = card_with_sound(&root.join("tests/data/margin.264"), 8000) else { return };
+    let mut m = start(&program, card);
+    let ms = m.cycles_per_ms();
+    for _ in 0..80 {
+        if console(&m).contains("aaviewer: frame 11 ") {
+            break;
+        }
+        assert_eq!(m.run(100 * ms), Stop::Budget, "{:?}: {}", m.cpu.fault, console(&m));
+    }
+    let at = m.console.len();
+    let volume = m.radio.volume;
+    for code in [0x04u8, 0x00, 0x05, 0x00, 0x06, 0x00, 0x06, 0x00] {
+        m.can_send_cyclic(Frame::new(0x5c3, &[0x39, code]), 100);
+        assert_eq!(m.run(300 * ms), Stop::Budget, "{:?}: {}", m.cpu.fault, console(&m));
+    }
+    assert_eq!(m.run(500 * ms), Stop::Budget);
+    let text = String::from_utf8_lossy(&m.console[at..]).into_owned();
+    let keys: Vec<u32> = text.lines().filter_map(|l| l.strip_prefix("aaviewer: input "))
+        .map(|c| u32::from_str_radix(c.trim(), 16).unwrap() & 0x3ff).filter(|w| w & 0x300 == 0).collect();
+    // NEXT (8) down and up, PREV (9) down and up.
+    assert_eq!(keys, vec![8 << 1 | 1, 8 << 1, 9 << 1 | 1, 9 << 1], "{}", text);
+    // Two short presses of volume up: two steps of the amplifier.
+    assert_eq!(m.radio.volume, volume + 2, "{}", text);
+}
+
 /// The phone's sound: a 1 kHz tone (48 kHz stereo, the left at half the
 /// right's level) in the stream between the pictures, played by the
 /// other card processor at 44.1 kHz through the amplifier's decoder
