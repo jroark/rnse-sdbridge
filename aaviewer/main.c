@@ -1181,6 +1181,12 @@ static void say_backlog(void)
     send_input(AALINK_IN_BACKLOG | n);
 }
 
+/* The car driver's other frames: the kit's canload's. */
+static void car_frame_other(u16 id, const u8 *data, int len)
+{
+    (void)canload_frame(id, data, len);
+}
+
 /* Changes of the steering wheel's key (the 193's reports). */
 static u32 wheel_changes;
 
@@ -1584,6 +1590,14 @@ int main(void)
      * the 193 its can_init left the bus silent, and the viewer's
      * reports, say, go through the controller as it was left.) */
     car_init();
+    /* A new viewer over CAN (the kit's canload, from canbench --push):
+     * on the 193 into the 1 MiB above the heap, where the SD loader
+     * also loads a program; the frames the car driver does not use come
+     * here.  Not on the 192 (its RAM is laid out otherwise). */
+    if (ON_193) {
+        canload_init((void *)0x8c000000, 0x100000);
+        car_other = car_frame_other;
+    }
     sd_idle = panel_service;
     display_idle = panel_service;
     loader_leave = leave;

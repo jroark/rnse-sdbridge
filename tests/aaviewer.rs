@@ -376,6 +376,83 @@ fn viewer_plays_the_phone_s_sound_on_the_193() {
     assert!(!gaps.is_empty() && gaps.iter().all(|&g| g == 0), "gaps: {:?}", gaps);
 }
 
+/// A new program over CAN while the viewer runs on the 193 (the kit's
+/// canload, as `canbench run ... --push FILE` sends it): the image in
+/// numbered frames of seven bytes, acknowledged every 32; the viewer
+/// checks the CRC, stops its sound and starts it.  Here the kit's
+/// examples/hello, which says so on the console.
+#[test]
+fn viewer_takes_a_new_program_over_can_on_the_193() {
+    use rnse::dev::hcan::Frame;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let Some(program) = build_193() else { return };
+    let sdk = std::env::var_os("RNSE_SDK").map(std::path::PathBuf::from).unwrap_or_else(|| root.join("../rnse-sdk"));
+    let out = std::process::Command::new("sh").arg(sdk.join("build.sh")).args(["193", "hello"]).current_dir(&sdk).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let image = std::fs::read(sdk.join("out/hello-193.bin")).unwrap();
+    let Some(card) = card_with_sound(&root.join("tests/data/margin.264"), 3000) else { return };
+    let mut m = start_193(&program, card);
+    m.can().start();
+    let ms = m.cycles_per_ms();
+    for _ in 0..200 {
+        if console(&m).contains("aaviewer: frame 11 ") {
+            break;
+        }
+        assert_eq!(m.run(100 * ms), Stop::Budget, "{:?}: {}", m.cpu.fault, console(&m));
+    }
+    let answers = |m: &mut Machine| -> Vec<[u8; 8]> {
+        let a: Vec<[u8; 8]> = m.can().tx.iter().filter(|f| f.id == 0x7f8 && f.len == 8 && (0xc0..=0xc2).contains(&f.data[0]))
+            .map(|f| { let mut d = [0u8; 8]; d.copy_from_slice(&f.data[..8]); d }).collect();
+        m.can().tx.retain(|f| !(f.id == 0x7f8 && (0xc0..=0xc2).contains(&f.data[0])));
+        a
+    };
+    let crc = {
+        let mut c = 0xffff_ffffu32;
+        for &b in &image {
+            c ^= u32::from(b);
+            for _ in 0..8 {
+                c = (c >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(c & 1));
+            }
+        }
+        !c
+    };
+    let n = image.len() as u32;
+    let mut start = vec![1u8, (n >> 16) as u8, (n >> 8) as u8, n as u8];
+    start.extend_from_slice(&crc.to_be_bytes());
+    m.can_frame(Frame::new(0x7f0, &start));
+    assert_eq!(m.run(50 * ms), Stop::Budget);
+    let a = answers(&mut m);
+    assert!(a.iter().any(|d| d[0] == 0xc0 && d[1] == 1), "{:?}: {}", a, console(&m));
+    let frames = (image.len() + 6) / 7;
+    let mut k = 0;
+    while k < frames {
+        let end = (k - k % 32 + 32).min(frames);
+        for i in k..end {
+            let mut d = vec![(i & 255) as u8];
+            d.extend_from_slice(&image[7 * i..(7 * i + 7).min(image.len())]);
+            m.can_frame(Frame::new(0x7f1, &d));
+        }
+        assert_eq!(m.run(60 * ms), Stop::Budget, "{:?}: {}", m.cpu.fault, console(&m));
+        let a = answers(&mut m);
+        let ack = a.iter().rev().find(|d| d[0] == 0xc1).unwrap_or_else(|| panic!("no answer at frame {}: {}", k, console(&m)));
+        assert_eq!(ack[1], 0, "a frame missing at {}", k);
+        let off = u32::from_be_bytes([ack[2], ack[3], ack[4], ack[5]]) as usize;
+        k = if off >= image.len() { frames } else { (off + 6) / 7 };
+    }
+    let at = m.console.len();
+    m.can_frame(Frame::new(0x7f0, &[3]));
+    for _ in 0..30 {
+        assert_eq!(m.run(100 * ms), Stop::Budget, "{:?}: {}", m.cpu.fault, console(&m));
+        if String::from_utf8_lossy(&m.console[at..]).contains("rnse sdk: hello") {
+            break;
+        }
+    }
+    let text = String::from_utf8_lossy(&m.console[at..]).into_owned();
+    assert!(text.contains("rnse sdk: hello"), "{}", text);
+    assert_eq!(m.run(2_500 * ms), Stop::Budget, "{:?}: {}", m.cpu.fault, console(&m));
+    assert!(String::from_utf8_lossy(&m.console[at..]).contains("tick 2"), "{}", console(&m));
+}
+
 /// The phone's sound: a 1 kHz tone (48 kHz stereo, the left at half the
 /// right's level) in the stream between the pictures, played by the
 /// other card processor at 44.1 kHz through the amplifier's decoder
