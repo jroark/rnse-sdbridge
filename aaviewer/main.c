@@ -306,11 +306,18 @@ static void (*show_idle)(void) = panel_service;
  * screen_blit, each pixel its own luma and its 2 x 2 block's chroma. */
 static u8 show_line[800];
 
+static u32 show_frames_193;
+
 static void show_193(const u8 *pic, u32 w, u32 h)
 {
     const u8 *cb = pic + w * h, *cr = cb + w * h / 4;
     u32 x, y, lines = h < (u32)screen_height ? h : (u32)screen_height;
     u32 cols = w < (u32)screen_width ? w : (u32)screen_width;
+    /* For the bench, now and then: the decoded picture's brightness
+     * (so a black picture is told from a black screen) and the biggest
+     * palette index this actually writes. */
+    int probe = (show_frames_193++ % 60) == 5;
+    u32 luma = 0, lumn = 0, maxix = 0;
     if (cols > sizeof show_line)
         cols = sizeof show_line;
     for (y = 0; y < lines; y++) {
@@ -320,8 +327,18 @@ static void show_193(const u8 *pic, u32 w, u32 h)
         for (x = 0; x < cols; x += 2) {
             show_line[x] = PIXEL(py[x], pb[x / 2], pr[x / 2]);
             show_line[x + 1] = PIXEL(py[x + 1], pb[x / 2], pr[x / 2]);
+            if (probe && !(y & 7)) {
+                luma += py[x];
+                lumn++;
+                if (show_line[x] > maxix)
+                    maxix = show_line[x];
+            }
         }
         screen_blit(0, (int)y, (int)cols, 1, show_line, (int)cols);
+    }
+    if (probe) {
+        say(0xd1, 0, w << 16 | (h & 0xffff), (u16)((lumn ? luma / lumn : 0) << 8 | maxix));
+        say(0xd1, 1, cols << 16 | lines, 0);
     }
 }
 
@@ -1528,6 +1545,32 @@ int main(void)
     /* (The 193's SH-4A keeps its caches as its software left them.) */
     if (!ON_193)
         cache_setup(CCR_EMODE | CCR_ICE | CCR_OCE | CCR_CB);
+
+    /* On the 193 the screen is dark until POWER is pressed, and this
+     * program's own board_init re-did the display after the loader's:
+     * a plain test first (colour bars and big text, the loader's own
+     * drawing), held a few seconds so that it is clear whether this
+     * program's picture shows at all, and so the user can press POWER
+     * again if the panel slept.  The picture uses palette 2 entries
+     * 2..9; the video's palette comes later (palette()). */
+    if (ON_193) {
+        int i;
+        for (i = 0; i < 8; i++)
+            screen_palette(2 + i, (u8)(i & 1 ? 255 : 0), (u8)(i & 2 ? 255 : 0), (u8)(i & 4 ? 255 : 0));
+        for (i = 0; i < 8; i++)
+            screen_fill(i * screen_width / 8, 240, screen_width / 8, screen_height - 240, (u8)(2 + i));
+        screen_text(16, 20, "AAVIEWER 193", WHITE, 4);
+        screen_text(16, 120, "IF DARK, PRESS POWER", WHITE, 2);
+        say(0xd2, 0, millis(), 0);
+        {
+            u32 end = millis() + 5000;
+            while ((s32)(millis() - end) < 0) {
+                panel_service();
+                pause(10);
+            }
+        }
+        screen_fill(0, 0, screen_width, screen_height, BLACK);
+    }
 
     for (;;) {
         while (open_bridge()) {
