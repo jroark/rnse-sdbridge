@@ -334,6 +334,18 @@ static void show_193(const u8 *pic, u32 w, u32 h)
                     maxix = show_line[x];
             }
         }
+        /* A bright border every frame (the bench, 2026-11-21): if it
+         * shows but the picture does not, the plane is live and the
+         * fault is the picture's colours; if the border never shows, the
+         * plane is not on screen while the video runs. */
+        if (y < 6 || y + 6 >= lines) {
+            for (x = 0; x < cols; x++)
+                show_line[x] = WHITE;
+        } else {
+            show_line[0] = show_line[1] = show_line[2] = WHITE;
+            if (cols >= 3)
+                show_line[cols - 1] = show_line[cols - 2] = show_line[cols - 3] = WHITE;
+        }
         screen_blit(0, (int)y, (int)cols, 1, show_line, (int)cols);
     }
     if (probe) {
@@ -1632,7 +1644,19 @@ int main(void)
                 break;
             say_backlog();
             if (ndone) {
-                decode_done();
+                /* On the 193 the SD reads gulp a big backlog each round
+                 * (fast reads, and no sound to pace them), so decoding
+                 * one picture a round never lets the queue fall to one,
+                 * and decode_done draws only the newest (ndone == 1):
+                 * the phone's video stayed black though every frame was
+                 * decoded (the bench, 2026-11-21).  Drain it here, which
+                 * decodes all and draws the last.  The 192 keeps one a
+                 * round, for the sound. */
+                if (ON_193)
+                    while (ndone && !dead)
+                        decode_done();
+                else
+                    decode_done();
                 say_backlog();
                 idle_since = millis();
             } else if (r == 0) {
