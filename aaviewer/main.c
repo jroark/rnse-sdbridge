@@ -174,7 +174,11 @@ static void line(const char *text)
  *           second the volume; 2 value the sound DMA channel's status,
  *           second the sound interface's status (its upper half); 3
  *           value what radio_source said (0 acknowledged, -9 not
- *           tried), second radio_answered
+ *           tried), second radio_answered; 4 value times the output
+ *           stalled (took nothing for a second: the sound then gives
+ *           way to the pictures), second 1 while it is stalled
+ *   0xd8 n  once, after the sound's start: the 193's audio registers
+ *           (value), the address's low half (second)
  *   0xd7 n  every 2 s, the car (CAN): 0 value changes of the steering
  *           wheel's key seen, second frames lost (can_lost); 1 value
  *           car_ignition (0xffffffff: no ignition message seen), second
@@ -717,6 +721,12 @@ static int sound_dsp = -1;
 static int volume = 12;
 /* For the 193's reports (say 0xd6): what the amplifier answered. */
 static int sound_radio = -9;
+/* When the output last took a block, and how often it was found stuck:
+ * an output that takes nothing for a second (the bench 193's first
+ * run, 2026-11-21: its sound interface never started) must not hold
+ * the pictures up behind a full FIFO, so the sound gives way then. */
+static u32 sound_moved, sound_stalls;
+static int sound_stalled;
 
 struct source {
     s16 *buf;
@@ -760,6 +770,15 @@ static void sound_put(int type, const u8 *p, u32 n)
 /* The frames of sound the media FIFO has room for. */
 static u32 sound_room(void)
 {
+    if (sound_dsp < 0)
+        return 0x7fffffff; /* no output at all: nothing to wait for */
+    if (millis() - sound_moved > 1000) {
+        if (!sound_stalled)
+            sound_stalls++;
+        sound_stalled = 1;
+        return 0x7fffffff; /* (sound_put drops what does not fit) */
+    }
+    sound_stalled = 0;
     return sources[0].frames - 1 - (sources[0].in - sources[0].out);
 }
 
@@ -823,6 +842,7 @@ static void sound_pump(void)
     while ((b = pcm_stream_block()) != 0) {
         mix(b);
         pcm_stream_ready();
+        sound_moved = millis();
     }
 }
 
@@ -848,8 +868,19 @@ static void sound_start(void)
         return;
     }
     sound_dsp = dsp;
+    sound_moved = millis();
     sound_radio = radio_source(RADIO_DECODER, volume);
     sound_pump();
+    /* The 193's audio registers as they are now, for the bench (0xd8:
+     * item, the register's value; second its address's low half). */
+    if (ON_193) {
+        static const u32 regs[] = { 0xff9900b8, 0xff973000, 0xff972000, 0xff986000, 0xff985000,
+                                    0xff986010, 0xff909000, 0xff909004, 0xff984000, 0xff984004, 0xff8011b4 };
+        u32 k;
+        pause(50);
+        for (k = 0; k < sizeof regs / sizeof regs[0]; k++)
+            say(0xd8, (u8)k, regs[k] == 0xff973000 ? REG16(regs[k]) : REG32(regs[k]), regs[k] & 0xffff);
+    }
 }
 
 static void sound_stop(void)
@@ -1441,6 +1472,7 @@ static void report(void)
     say(0xd6, 1, sources[0].dropped, (u32)volume);
     say(0xd6, 2, REG32(0xff8011b4), REG32(0xff984004) >> 16);
     say(0xd6, 3, (u32)sound_radio, (u32)radio_answered);
+    say(0xd6, 4, sound_stalls, (u32)sound_stalled);
     say(0xd7, 0, wheel_changes, can_lost());
     say(0xd7, 1, (u32)car_ignition(), (u32)car_wheel());
     last_frames = frames;
@@ -1606,6 +1638,7 @@ int main(void)
             if (sound_room() < RUN * (AALINK_PAYLOAD / 4)) {
                 pause(5);
                 inputs();
+                report(); /* (the reports go on while it waits) */
                 continue;
             }
             /* All the bridge has (up to 256 KB, some 130 ms at 2 MB/s),
