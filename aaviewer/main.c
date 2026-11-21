@@ -1582,6 +1582,17 @@ int main(void)
         panel_attach();
     else
         panel_init();
+    /* On the 193 the faceplate's start is answered before any card is
+     * touched: a viewer that went straight to an empty slot 2 (its
+     * answers waited for up to half a second each) left a bench 193's
+     * front dark for good (2026-11-21). */
+    if (ON_193) {
+        u32 t = millis();
+        while (millis() - t < 600) {
+            panel_service();
+            cpu_idle();
+        }
+    }
     /* The car (the kit's src/car.c): served by panel_service, it puts
      * the steering wheel's keys among the faceplate's, so that seek
      * up/down are NEXT/PREV for the phone and the wheel's volume keys
