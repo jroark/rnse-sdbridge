@@ -1,4 +1,4 @@
-# Android Auto on the 192: what has been found out
+# Android Auto on the 192 (and the 193): what has been found out
 
 The question: can the 192 be an Android Auto head unit with its own
 processor, display and sound, so that no more powerful computer is put
@@ -289,3 +289,47 @@ tried on a Mac against a phone (certificate, cipher, margins, the bit
 rate when frames are acknowledged slowly), `linkbench` on the unit and
 then the bridge itself (the card side of the link, and writes for the
 way back to the phone), and a short trial of Linux in the emulator.
+
+## The 193
+
+(2026-11-21.)  The same viewer, `aaviewer/`, runs on the 193 (8P0/8J0
+035 193), started by rnse-sdk's `examples/sdload193` from a card in
+slot 1 as `RNSE.BIN`, with the bridge (`SDLINK.UF2`) in slot 2.  On the
+bench 193 it shows the phone's Android Auto (Google Maps, the media
+card, the app bar) full screen, 800x480, at the phone's own 30 pictures
+a second: some 17 ms decoding, 15 ms drawing and 3 ms reading a
+picture, the bridge's 364 KB/s, no block read twice.  The 193's SH-4A
+decodes about three times as fast as the 192.
+
+What differs from the 192:
+
+- **Reading.** The 193 reads the card through its own SD host (the
+  kit's `sdhi_read_multi`, CMD18, 2.9 MB/s from the bridge on the
+  unit), not through a card processor.  Its reads gulp the bridge's
+  whole backlog each round, so the viewer decodes every waiting picture
+  each round and draws the newest; decoding one a round (the 192's way,
+  to keep the sound fed) never let the queue fall to one, and nothing
+  was ever drawn.
+- **The picture.** Shown whole, 800x480, not halved.  The kit draws on
+  the 193 through a 16-bit plane (RGB555, as the stock software's
+  planes); its earlier 8-bits-through-a-palette plane came out a flat
+  light grey on the unit.
+- **The board.** The bridge must be the Raspberry Pi Pico build at
+  250 MHz (`SYS_KHZ=250000 ./build.sh`, `out/pico/SDLINK.UF2`); the
+  RP2040-Zero build at 200 MHz answered the 193's CMD8 but not its
+  CMD55.
+- **The screen.** On the bench 193, whose software is locked by its
+  anti-theft code, the screen stays dark until POWER is pressed, also
+  while the viewer runs.
+- **No sound yet.**  The 193 plays through its serial sound interface,
+  not a card processor; the viewer drops the phone's sound there.
+- **Keys.** The knob and keys go to the phone as on the 192, and CD
+  EJECT ejects; the display key is not followed (which of the 193's
+  motor lines opens the display is not yet measured); RETURN held says
+  there is no loader to return to (the 193's loader is on the disc).
+- **Reports.** The bench has no console, so the viewer reports on CAN
+  0x7F8 (records 0xd0-0xd5, in `aaviewer/main.c`).
+
+Needs rnse-sdk's `bench-193` work (the 193's SD host, its 16-bit
+picture, `build.sh` building an example with a `place` file for the
+193).
