@@ -875,7 +875,8 @@ static void sound_start(void)
      * item, the register's value; second its address's low half). */
     if (ON_193) {
         static const u32 regs[] = { 0xff9900b8, 0xff973000, 0xff972000, 0xff986000, 0xff985000,
-                                    0xff986010, 0xff909000, 0xff909004, 0xff984000, 0xff984004, 0xff8011b4 };
+                                    0xff986010, 0xff909000, 0xff909004, 0xff984000, 0xff984004, 0xff8011b4,
+                                    0xff93e008, 0xff90301c, 0xff900864 };
         u32 k;
         pause(50);
         for (k = 0; k < sizeof regs / sizeof regs[0]; k++)
