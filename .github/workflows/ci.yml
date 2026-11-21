@@ -25,9 +25,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: jroark/rnse-sdk
-          # The 193's SD host and 16-bit picture (aaviewer on the 193):
-          # rnse-sdk's bench-193 branch until it is merged and tagged.
-          ref: bench-193
+          # v0.3.0: the 193's SD host and 16-bit picture (aaviewer on
+          # the 193).
+          ref: v0.3.0
           path: rnse-sdk
       - name: SH-4 cross compiler
         run: sudo apt-get update && sudo apt-get install -y gcc-sh4-linux-gnu binutils-sh4-linux-gnu

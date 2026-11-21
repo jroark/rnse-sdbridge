@@ -330,6 +330,6 @@ What differs from the 192:
 - **Reports.** The bench has no console, so the viewer reports on CAN
   0x7F8 (records 0xd0-0xd5, in `aaviewer/main.c`).
 
-Needs rnse-sdk's `bench-193` work (the 193's SD host, its 16-bit
+Needs rnse-sdk v0.3.0 or later (the 193's SD host, its 16-bit
 picture, `build.sh` building an example with a `place` file for the
 193).
