@@ -334,8 +334,9 @@ What differs from the 192:
   software left it (`can_attach`). Tested in the emulator
   (`viewer_follows_the_steering_wheel_on_the_193`); not yet on the unit.
 - **Keys.** The knob and keys go to the phone as on the 192, and CD
-  EJECT ejects; the display key is not followed (which of the 193's
-  motor lines opens the display is not yet measured); RETURN held says
+  EJECT ejects; the display key opens and closes the display (kit v0.4.0,
+  its motor lines read off the stock software; tested in the emulator,
+  `viewer_keys_on_the_193`, not yet on a unit); RETURN held says
   there is no loader to return to (the 193's loader is on the disc).
 - **Reports.** The bench has no console, so the viewer reports on CAN
   0x7F8 (records 0xd0-0xd7, in `aaviewer/main.c`; 0xd6 the sound,

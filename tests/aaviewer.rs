@@ -517,6 +517,18 @@ fn viewer_keys_on_the_193() {
     assert_eq!(knob, 2, "{}", text);
     assert_eq!(keys, vec![6 << 1 | 1, 6 << 1], "{}", text);
 
+    // The display key opens the display (the hardware rules: the disc
+    // must be reachable from every program), the motor stops when it is
+    // open, and the key closes it again.
+    assert!(m.display_pos() >= 894, "starts closed: {}", m.display_pos());
+    assert!(m.panel_key("EJECT", true));
+    assert_eq!(m.run(200 * ms), Stop::Budget);
+    assert!(m.panel_key("EJECT", false));
+    assert_eq!(m.display_motor(), -1, "opening: {}", console(&m));
+    assert_eq!(m.run(3_000 * ms), Stop::Budget, "{:?}: {}", m.cpu.fault, console(&m));
+    assert!(m.display_pos() <= 94, "open: {}", m.display_pos());
+    assert_eq!(m.display_motor(), 0, "the motor stops when open");
+
     // A disc in the drive (any data: the eject is what is looked at).
     m.atapi().insert(Some(vec![0u8; 64 * 2048]));
     assert_eq!(m.run(500 * ms), Stop::Budget);
@@ -527,6 +539,12 @@ fn viewer_keys_on_the_193() {
     assert_eq!(m.run(500 * ms), Stop::Budget);
     let ejects = m.atapi().ejects;
     assert_eq!(ejects, before + 1, "{}", console(&m));
+    assert!(m.panel_key("EJECT", true));
+    assert_eq!(m.run(200 * ms), Stop::Budget);
+    assert!(m.panel_key("EJECT", false));
+    assert_eq!(m.run(3_000 * ms), Stop::Budget, "{:?}: {}", m.cpu.fault, console(&m));
+    assert!(m.display_pos() >= 894, "closed again: {}", m.display_pos());
+    assert_eq!(m.display_motor(), 0, "the motor stops when closed");
 
     assert!(m.panel_key("RETURN", true));
     assert_eq!(m.run(2500 * ms), Stop::Budget);
