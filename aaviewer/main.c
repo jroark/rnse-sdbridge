@@ -177,6 +177,9 @@ static void line(const char *text)
  *           tried), second radio_answered; 4 value times the output
  *           stalled (took nothing for a second: the sound then gives
  *           way to the pictures), second 1 while it is stalled
+ *   0xd9 s  whenever the display's state or its key changes: s the
+ *           state (DISPLAY_*), value the position (0 open .. 1023
+ *           closed), second 1 while the key is down
  *   0xd8 n  once, after the sound's start: the 193's audio registers
  *           (value), the address's low half (second)
  *   0xd7 n  every 2 s, the car (CAN): 0 value changes of the steering
@@ -215,11 +218,33 @@ static void say(u8 test, u8 item, u32 value, u32 second)
 /* Called while the program waits (main sets it: the sound fed). */
 static void (*wait_idle)(void);
 
+/* The 193's display and its key, reported on CAN whenever either
+ * changes (0xd9: item the state, DISPLAY_*; value the position;
+ * second the key, 1 down): what the bench needs when the key seems not
+ * to answer.  Nothing on the 192. */
+static void display_watch(void)
+{
+    static int key = -1, state = -1;
+    static u32 at;
+    int k, st;
+    if (!ON_193 || millis() - at < 50)
+        return;
+    at = millis();
+    k = panel_key(KEY_DISPLAY) != 0;
+    st = display_state();
+    if (k != key || st != state) {
+        key = k;
+        state = st;
+        say(0xd9, (u8)st, (u32)display_position(), (u32)k);
+    }
+}
+
 static void pause(u32 ms)
 {
     u32 t = millis();
     while (millis() - t < ms) {
         panel_service();
+        display_watch();
         if (wait_idle)
             wait_idle();
         cpu_idle();
@@ -1237,6 +1262,7 @@ static void busy_read(void)
 static void busy(void)
 {
     panel_service();
+    display_watch();
     sound_pump();
     if (link_up && !dead) {
         busy_read();
