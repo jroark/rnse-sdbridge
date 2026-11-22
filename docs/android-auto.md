@@ -338,6 +338,13 @@ What differs from the 192:
   its motor lines read off the stock software; tested in the emulator,
   `viewer_keys_on_the_193`, not yet on a unit); RETURN held says
   there is no loader to return to (the 193's loader is on the disc).
+- **Times.** Until kit v0.4.0 the kit's clock ran twice too fast on a
+  real 193 (its tick handler was entered twice for each tick: rnse's
+  `docs/hardware-193.md`, "Timer interrupts").  A viewer built on an
+  earlier kit kept all its times at half the world's: its time-outs,
+  its pacing of the sound, and the milliseconds in its reports, which
+  are half of what a picture really took.  The figures measured on the
+  unit before that have not been taken again.
 - **Reports.** The bench has no console, so the viewer reports on CAN
   0x7F8 (records 0xd0-0xd7, in `aaviewer/main.c`; 0xd6 the sound,
   0xd7 the car).

@@ -25,9 +25,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: jroark/rnse-sdk
-          # v0.3.0: the 193's SD host and 16-bit picture (aaviewer on
-          # the 193).
-          ref: v0.4.0
+          # The kit's main of 2026-11-22, v0.4.0's contents (sound, the
+          # radio processor and CAN on the 193, the clock at the
+          # world's pace, smaller builds); the tag is not cut yet.
+          ref: 00145aa7a353e5b7f71ef1beff5e2a0a324e29f8
           path: rnse-sdk
       - name: SH-4 cross compiler
         run: sudo apt-get update && sudo apt-get install -y gcc-sh4-linux-gnu binutils-sh4-linux-gnu

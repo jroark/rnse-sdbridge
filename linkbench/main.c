@@ -620,7 +620,11 @@ static int read_cmd18(u32 sector, u32 n, u8 *to, struct result *r, int burst)
         if (b < 0)
             return -1;
         note(r, b);
-        if (k < MAPPED)
+        /* (Only for a test's own result: the checks before the tests
+         * read into a result of their own, on the stack, and the row
+         * worked out from that was nowhere in the map: a store through
+         * a stray pointer for every sector they read.) */
+        if (k < MAPPED && r >= res && r < res + TESTS)
             header_map[r - res][k] = b & 0x80 ? (b & 0x20 ? 'B' : 'T') : (b & 0x20 ? 'O' : '.');
     }
     if (get(&h, 1000) || get(&late, 100))
