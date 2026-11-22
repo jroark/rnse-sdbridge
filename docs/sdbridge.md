@@ -795,7 +795,15 @@ scan code 65536 the rotary controller).  The viewer's mapping: the
 select knob turned is the rotary controller and pushed is ENTER, RETURN
 pressed briefly BACK, NAV home, MEDIA play/pause, NEXT and PREV the
 tracks, the four keys at the screen's corners up, down, right and left;
-RETURN held, the display key and CD EJECT stay the unit's.
+RETURN held, the display key and CD EJECT stay the unit's.  The steering
+wheel (the kit's car driver, `docs/car-bus.md` in rnse-sdk; CAN 0x5C3)
+comes in as the same keys: its seek up and down as NEXT and PREV, its
+volume keys as the volume knob.  Tested in the emulator
+(`viewer_follows_the_steering_wheel`); the wheel's codes themselves were
+seen on a unit with the stock software, the viewer with them not yet.
+On the 193 too, since kit v0.4.0, whose car driver takes the CAN
+controller as the stock software left it (`can_attach`; the kit's
+`can_init` left the bench 193's bus silent).
 
 **Sound.**  The phone's sound goes through the same stream: its media
 channel (48 kHz stereo), its navigation voice and its own sounds (16 kHz

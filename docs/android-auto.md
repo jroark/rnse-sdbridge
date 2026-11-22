@@ -321,15 +321,34 @@ What differs from the 192:
 - **The screen.** On the bench 193, whose software is locked by its
   anti-theft code, the screen stays dark until POWER is pressed, also
   while the viewer runs.
-- **No sound yet.**  The 193 plays through its serial sound interface,
-  not a card processor; the viewer drops the phone's sound there.
+- **Sound.** The 193 plays the phone's sound through its own serial
+  sound interface, not a card processor (the kit's `pcm_stream` on the
+  193, from v0.4.0). The mix is the 192's, at 44.1 kHz, in blocks of
+  2048 frames, twice the 192's length: the 193 takes no interrupt for
+  sound, so the ring moves on only when the viewer pumps it. The
+  amplifier is set over the 193's radio processor line. Tested in the
+  emulator (`viewer_plays_the_phone_s_sound_on_the_193`); not yet heard
+  on the unit.
+- **The steering wheel.** As on the 192 (the kit's car driver).
+  Since kit v0.4.0 the driver takes the CAN controller as the stock
+  software left it (`can_attach`). Tested in the emulator
+  (`viewer_follows_the_steering_wheel_on_the_193`); not yet on the unit.
 - **Keys.** The knob and keys go to the phone as on the 192, and CD
-  EJECT ejects; the display key is not followed (which of the 193's
-  motor lines opens the display is not yet measured); RETURN held says
+  EJECT ejects; the display key opens and closes the display (kit v0.4.0,
+  its motor lines read off the stock software; tested in the emulator,
+  `viewer_keys_on_the_193`, not yet on a unit); RETURN held says
   there is no loader to return to (the 193's loader is on the disc).
+- **Times.** Until kit v0.4.0 the kit's clock ran twice too fast on a
+  real 193 (its tick handler was entered twice for each tick: rnse's
+  `docs/hardware-193.md`, "Timer interrupts").  A viewer built on an
+  earlier kit kept all its times at half the world's: its time-outs,
+  its pacing of the sound, and the milliseconds in its reports, which
+  are half of what a picture really took.  The figures measured on the
+  unit before that have not been taken again.
 - **Reports.** The bench has no console, so the viewer reports on CAN
-  0x7F8 (records 0xd0-0xd5, in `aaviewer/main.c`).
+  0x7F8 (records 0xd0-0xd7, in `aaviewer/main.c`; 0xd6 the sound,
+  0xd7 the car).
 
-Needs rnse-sdk v0.3.0 or later (the 193's SD host, its 16-bit
+Needs rnse-sdk v0.4.0 or later (sound and CAN on the 193; v0.3.0 for the 193's SD host, its 16-bit
 picture, `build.sh` building an example with a `place` file for the
 193).

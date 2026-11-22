@@ -47,9 +47,9 @@
  * card as RNSE.BIN, its place being 1 MiB there.  The bridge is read
  * through the chip's own SD host (the kit's sdhi_read_multi: CMD18, some
  * 2.9 MB/s from the bridge on a unit), the picture is shown whole, 800
- * by 480, through the same palette, and there is no sound yet (the 193
- * plays through its serial sound interface, not through a card
- * processor).  ON_193 below says which. */
+ * by 480, through the same palette, and the sound goes out through the
+ * chip's serial sound interface (the kit's pcm_stream on the 193), not
+ * through a card processor.  ON_193 below says which. */
 #include "rnse.h"
 #include "h264bsd_decoder.h"
 #include "aalink.h"
@@ -168,7 +168,24 @@ static void line(const char *text)
  *   0xd5 n  every 2 s: n = 0 value frames, second fps x10; 1 value KB/s,
  *           second ms decoding a frame; 2 value ms showing, second ms
  *           reading; 3 value blocks read again, second missing; 4 value
- *           skipped pictures, second inputs sent */
+ *           skipped pictures, second inputs sent
+ *   0xd6 n  every 2 s, the sound: n = 0 value times the media ran dry,
+ *           second gaps (pcm_gaps); 1 value media frames dropped,
+ *           second the volume; 2 value the sound DMA channel's status,
+ *           second the sound interface's status (its upper half); 3
+ *           value what radio_source said (0 acknowledged, -9 not
+ *           tried), second radio_answered; 4 value times the output
+ *           stalled (took nothing for a second: the sound then gives
+ *           way to the pictures), second 1 while it is stalled
+ *   0xd9 s  whenever the display's state or its key changes: s the
+ *           state (DISPLAY_*), value the position (0 open .. 1023
+ *           closed), second 1 while the key is down
+ *   0xd8 n  once, after the sound's start: the 193's audio registers
+ *           (value), the address's low half (second)
+ *   0xd7 n  every 2 s, the car (CAN): 0 value changes of the steering
+ *           wheel's key seen, second frames lost (can_lost); 1 value
+ *           car_ignition (0xffffffff: no ignition message seen), second
+ *           the wheel's key now */
 #define CAN193 0xffdf0000
 #define CAN193_MB1 (CAN193 + 0x100 + 0x20)
 
@@ -201,11 +218,33 @@ static void say(u8 test, u8 item, u32 value, u32 second)
 /* Called while the program waits (main sets it: the sound fed). */
 static void (*wait_idle)(void);
 
+/* The 193's display and its key, reported on CAN whenever either
+ * changes (0xd9: item the state, DISPLAY_*; value the position;
+ * second the key, 1 down): what the bench needs when the key seems not
+ * to answer.  Nothing on the 192. */
+static void display_watch(void)
+{
+    static int key = -1, state = -1;
+    static u32 at;
+    int k, st;
+    if (!ON_193 || millis() - at < 50)
+        return;
+    at = millis();
+    k = panel_key(KEY_DISPLAY) != 0;
+    st = display_state();
+    if (k != key || st != state) {
+        key = k;
+        state = st;
+        say(0xd9, (u8)st, (u32)display_position(), (u32)k);
+    }
+}
+
 static void pause(u32 ms)
 {
     u32 t = millis();
     while (millis() - t < ms) {
         panel_service();
+        display_watch();
         if (wait_idle)
             wait_idle();
         cpu_idle();
@@ -693,12 +732,26 @@ static int find_link(void)
  * on a unit, 2026-11-18, where 200 ms ran dry now and then), a fraction
  * of a per cent of pitch.  A source
  * plays once it has that much, and stops (silence) when it runs dry.
- * The volume knob sets the amplifier's volume (radio_volume). */
-#define SOUND_BLOCK 1024              /* stereo frames a block of the ring */
-#define SOUND_BLOCKS 12               /* 0.28 s */
-static s16 sound_ring[2 * SOUND_BLOCK * SOUND_BLOCKS] __attribute__((aligned(32)));
+ * The volume knob sets the amplifier's volume (radio_volume).
+ *
+ * The 193 plays the same mix through its own sound interface (the kit's
+ * pcm_stream there; no card processor).  It takes no interrupt for it:
+ * the ring moves on when sound_pump asks for a block, and the channel
+ * holds two, so its blocks are twice as long (46 ms) for the same ring
+ * (0.28 s), to ride out a picture's drawing between two pumps. */
+#define SOUND_FRAMES (1024 * 12)      /* the ring: 0.28 s of stereo frames */
+static u32 sound_block = 1024;        /* stereo frames a block (2048 on the 193) */
+static s16 sound_ring[2 * SOUND_FRAMES] __attribute__((aligned(32)));
 static int sound_dsp = -1;
 static int volume = 12;
+/* For the 193's reports (say 0xd6): what the amplifier answered. */
+static int sound_radio = -9;
+/* When the output last took a block, and how often it was found stuck:
+ * an output that takes nothing for a second (the bench 193's first
+ * run, 2026-11-21: its sound interface never started) must not hold
+ * the pictures up behind a full FIFO, so the sound gives way then. */
+static u32 sound_moved, sound_stalls;
+static int sound_stalled;
 
 struct source {
     s16 *buf;
@@ -724,8 +777,6 @@ static void sound_put(int type, const u8 *p, u32 n)
 {
     struct source *f = &sources[type - AALINK_SOUND_MEDIA];
     u32 k, frames = n / (2 * f->channels);
-    if (ON_193)
-        return;
     for (k = 0; k < frames; k++) {
         s16 *at;
         if (f->in - f->out >= f->frames - 1) {
@@ -744,8 +795,15 @@ static void sound_put(int type, const u8 *p, u32 n)
 /* The frames of sound the media FIFO has room for. */
 static u32 sound_room(void)
 {
-    if (ON_193)
-        return 0x7fffffff; /* no sound there yet: reads never wait for it */
+    if (sound_dsp < 0)
+        return 0x7fffffff; /* no output at all: nothing to wait for */
+    if (millis() - sound_moved > 1000) {
+        if (!sound_stalled)
+            sound_stalls++;
+        sound_stalled = 1;
+        return 0x7fffffff; /* (sound_put drops what does not fit) */
+    }
+    sound_stalled = 0;
     return sources[0].frames - 1 - (sources[0].in - sources[0].out);
 }
 
@@ -758,7 +816,7 @@ static s32 sat(s32 v)
 static void mix(s16 *out)
 {
     u32 i, k;
-    for (i = 0; i < 2 * SOUND_BLOCK; i++)
+    for (i = 0; i < 2 * sound_block; i++)
         out[i] = 0;
     for (k = 0; k < 3; k++) {
         struct source *f = &sources[k];
@@ -777,7 +835,7 @@ static void mix(s16 *out)
         if (nudge < -(s32)(f->base / 200))
             nudge = -(s32)(f->base / 200);
         f->step = (u32)((s32)f->base + nudge);
-        for (i = 0; i < SOUND_BLOCK; i++) {
+        for (i = 0; i < sound_block; i++) {
             const s16 *a, *b;
             s32 l, r;
             if (f->in - f->out < 2) {
@@ -809,33 +867,46 @@ static void sound_pump(void)
     while ((b = pcm_stream_block()) != 0) {
         mix(b);
         pcm_stream_ready();
+        sound_moved = millis();
     }
 }
 
 /* The processor that is not the bridge's (slot ^ 1) takes the kit's
- * PCM program; the amplifier its sound. */
+ * PCM program; the amplifier its sound.  (On the 193 the chip's own
+ * sound interface, whatever dsp says.) */
 static void sound_start(void)
 {
     int dsp = slot ^ 1;
     u32 k;
-    if (ON_193)
-        return;
+    sound_block = ON_193 ? 2048 : 1024;
     for (k = 0; k < 3; k++) {
         sources[k].in = sources[k].out = sources[k].frac = 0;
         sources[k].playing = 0;
     }
     if (pcm_start(dsp)) {
-        line("SOUND: THE OTHER CARD PROCESSOR DOES NOT START");
+        line(ON_193 ? "SOUND: NO OUTPUT" : "SOUND: THE OTHER CARD PROCESSOR DOES NOT START");
         return;
     }
-    if (pcm_stream(sound_ring, SOUND_BLOCK, SOUND_BLOCKS)) {
+    if (pcm_stream(sound_ring, sound_block, SOUND_FRAMES / sound_block)) {
         pcm_stop();
         line("SOUND: NO STREAM");
         return;
     }
     sound_dsp = dsp;
-    radio_source(RADIO_DECODER, volume);
+    sound_moved = millis();
+    sound_radio = radio_source(RADIO_DECODER, volume);
     sound_pump();
+    /* The 193's audio registers as they are now, for the bench (0xd8:
+     * item, the register's value; second its address's low half). */
+    if (ON_193) {
+        static const u32 regs[] = { 0xff9900b8, 0xff973000, 0xff972000, 0xff986000, 0xff985000,
+                                    0xff986010, 0xff909000, 0xff909004, 0xff984000, 0xff984004, 0xff8011b4,
+                                    0xff93e008, 0xff90301c, 0xff900864 };
+        u32 k;
+        pause(50);
+        for (k = 0; k < sizeof regs / sizeof regs[0]; k++)
+            say(0xd8, (u8)k, regs[k] == 0xff973000 ? REG16(regs[k]) : REG32(regs[k]), regs[k] & 0xffff);
+    }
 }
 
 static void sound_stop(void)
@@ -1069,7 +1140,8 @@ static int read_blocks(u32 want)
  * BACK (held, the way back to the loader, as everywhere); NAV home, MEDIA
  * play/pause, NEXT and PREV the tracks, the four keys at the screen's
  * corners up, down, right and left.  The display key and CD EJECT stay
- * the unit's (panel_service). */
+ * the unit's (panel_service).  The steering wheel's seek keys arrive as
+ * NEXT and PREV and its volume keys as the volume knob (car_init). */
 static const struct {
     u8 key, aa;
 } key_map[] = {
@@ -1109,10 +1181,24 @@ static void say_backlog(void)
     send_input(AALINK_IN_BACKLOG | n);
 }
 
+/* The car driver's other frames: the kit's canload's. */
+static void car_frame_other(u16 id, const u8 *data, int len)
+{
+    (void)canload_frame(id, data, len);
+}
+
+/* Changes of the steering wheel's key (the 193's reports). */
+static u32 wheel_changes;
+
 static void inputs(void)
 {
     u32 i;
     int v = panel_knob(KNOB_VOLUME), d = panel_knob(KNOB_SELECT);
+    static int wheel;
+    if (car_wheel() != wheel) {
+        wheel = car_wheel();
+        wheel_changes++;
+    }
     /* The volume knob: the unit's amplifier, as everywhere. */
     if (v) {
         volume += v;
@@ -1182,6 +1268,7 @@ static void busy_read(void)
 static void busy(void)
 {
     panel_service();
+    display_watch();
     sound_pump();
     if (link_up && !dead) {
         busy_read();
@@ -1390,6 +1477,10 @@ static void report(void)
     q = put_dec(q, sources[0].dry + sources[1].dry + sources[2].dry);
     q = put_str(q, " dropped ");
     q = put_dec(q, sources[0].dropped + sources[1].dropped + sources[2].dropped);
+    q = put_str(q, " gaps ");
+    q = put_dec(q, pcm_gaps);
+    q = put_str(q, "; wheel ");
+    q = put_dec(q, wheel_changes);
     *q = 0;
     console_puts(text);
     console_puts("\n");
@@ -1410,6 +1501,13 @@ static void report(void)
     say(0xd5, 2, frames ? show_us / 1000 / frames : 0, frames ? read_us / 1000 / frames : 0);
     say(0xd5, 3, again, missing_blocks);
     say(0xd5, 4, skipped, inputs_sent);
+    say(0xd6, 0, sources[0].dry, pcm_gaps);
+    say(0xd6, 1, sources[0].dropped, (u32)volume);
+    say(0xd6, 2, REG32(0xff8011b4), REG32(0xff984004) >> 16);
+    say(0xd6, 3, (u32)sound_radio, (u32)radio_answered);
+    say(0xd6, 4, sound_stalls, (u32)sound_stalled);
+    say(0xd7, 0, wheel_changes, can_lost());
+    say(0xd7, 1, (u32)car_ignition(), (u32)car_wheel());
     last_frames = frames;
     last_bytes = bytes_in;
     last_report = now;
@@ -1484,6 +1582,33 @@ int main(void)
         panel_attach();
     else
         panel_init();
+    /* On the 193 the faceplate's start is answered before any card is
+     * touched: a viewer that went straight to an empty slot 2 (its
+     * answers waited for up to half a second each) left a bench 193's
+     * front dark for good (2026-11-21). */
+    if (ON_193) {
+        u32 t = millis();
+        while (millis() - t < 600) {
+            panel_service();
+            cpu_idle();
+        }
+    }
+    /* The car (the kit's src/car.c): served by panel_service, it puts
+     * the steering wheel's keys among the faceplate's, so that seek
+     * up/down are NEXT/PREV for the phone and the wheel's volume keys
+     * turn the volume knob (inputs, below).  (The kit's car_init takes
+     * the CAN controller as the stock software left it, can_attach: on
+     * the 193 its can_init left the bus silent, and the viewer's
+     * reports, say, go through the controller as it was left.) */
+    car_init();
+    /* A new viewer over CAN (the kit's canload, from canbench --push):
+     * on the 193 into the 1 MiB above the heap, where the SD loader
+     * also loads a program; the frames the car driver does not use come
+     * here.  Not on the 192 (its RAM is laid out otherwise). */
+    if (ON_193) {
+        canload_init((void *)0x8c000000, 0x100000);
+        car_other = car_frame_other;
+    }
     sd_idle = panel_service;
     display_idle = panel_service;
     loader_leave = leave;
@@ -1565,6 +1690,7 @@ int main(void)
             if (sound_room() < RUN * (AALINK_PAYLOAD / 4)) {
                 pause(5);
                 inputs();
+                report(); /* (the reports go on while it waits) */
                 continue;
             }
             /* All the bridge has (up to 256 KB, some 130 ms at 2 MB/s),
