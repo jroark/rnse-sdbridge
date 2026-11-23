@@ -17,6 +17,8 @@
 #include <string.h>
 #include <unistd.h>
 #include "../src/aa_session.h"
+#include "../src/aa_feed.h"
+#include "../src/aa_streamsink.h"
 
 static int failures;
 #define CHECK(c) do { if (!(c)) { printf("%s:%d: %s\n", __FILE__, __LINE__, #c); failures++; } } while (0)
@@ -294,6 +296,181 @@ static uint8_t video_message(uint32_t n)
     return sum;
 }
 
+/* ---- the feed (src/aa_feed.c) into a stream in RAM ------------------- */
+
+#define RING 128
+static uint8_t ring[RING][512];
+static struct aastream stream;
+static struct aa_streamsink streamsink;
+static struct aa_feed feed;
+static int unit_is_reading = 1;
+/* What the stand-in 192 has read: blocks by type, and the pictures'
+ * bytes. */
+static uint32_t unit_blocks[16], unit_picture_bytes, unit_starts, unit_keys;
+static uint8_t unit_picture_sum;
+
+static int reading(void *ctx)
+{
+    (void)ctx;
+    return unit_is_reading;
+}
+
+/* The 192 reads every block there is, each a read of its own. */
+static void unit_reads(void)
+{
+    while (stream.tail != stream.head) {
+        uint32_t w[128], seq = stream.tail, flags, fill, i;
+        uint32_t index = AALINK_CTL_SECTORS + seq % AALINK_WINDOW, wi;
+        CHECK(aastream_in_window(index, &wi));
+        aastream_consumed(&stream, wi);
+        aastream_sector(&stream, index, w);
+        flags = w[3] >> 16;
+        fill = w[3] & 0xffff;
+        CHECK(w[0] == AALINK_BLOCK_MAGIC && w[1] == seq && (flags & AALINK_READY) && fill <= AALINK_PAYLOAD);
+        unit_blocks[AALINK_TYPE(flags)]++;
+        if (flags & AALINK_START)
+            unit_starts++;
+        if (flags & AALINK_KEY)
+            unit_keys++;
+        if (AALINK_TYPE(flags) == AALINK_PICTURE) {
+            unit_picture_bytes += fill;
+            for (i = 0; i < fill; i++)
+                unit_picture_sum = (uint8_t)(unit_picture_sum + (uint8_t)(w[5 + i / 4] >> (24 - 8 * (i % 4))));
+        }
+        aastream_went_out(&stream, seq);
+        /* The next read lets this block go. */
+        aastream_consumed(&stream, (wi + 1) % AALINK_WINDOW);
+    }
+}
+
+/* The link run, the feed taking what it has room for. */
+static void run_feed(void)
+{
+    static uint8_t in[QUEUE];
+    int rounds;
+    for (rounds = 0; rounds < 200; rounds++) {
+        phone_runs();
+        if (aa_feed_idle(&feed) && to_hu.len) {
+            memcpy(in, to_hu.b, to_hu.len);
+            aa_feed_give(&feed, in, (uint32_t)to_hu.len);
+            to_hu.len = 0;
+        }
+        aa_feed_run(&feed);
+        if (!to_phone.len && !to_hu.len && (aa_feed_idle(&feed) || feed.paused))
+            break;
+    }
+    CHECK(rounds < 200);
+}
+
+static void feed_tests(const char *dir, const struct aa_session_cert *c)
+{
+    static uint8_t config[] = { 0x00, AA_AV_MEDIA, 0, 0, 0, 1, 0x67, 66, 0xc0, 31, 0, 0, 0, 1, 0x68, 0xce };
+    static uint8_t pcm[10 + 2048];
+    struct aa_sink sink;
+    uint8_t sum = 0;
+    uint32_t i;
+    int k;
+    aastream_init(&stream, ring, RING);
+    aa_streamsink_init(&streamsink, &stream, reading, NULL);
+    aa_streamsink_sink(&streamsink, &sink);
+    aa_feed_init(&feed, io_send, io_us, NULL, c, 1, &sink);
+    phone_starts(dir, "hu.crt");
+    CHECK(aa_feed_open(&feed) == 0);
+    run_feed();
+    CHECK(feed.ses.state == AA_S_AUTHED && phone.discovery == 1);
+    CHECK((stream.state & AALINK_PHONE) && stream.width == AA_HU_WIDTH && stream.height == AA_HU_HEIGHT);
+
+    /* The codec's configuration and a key frame: in the stream, and
+     * acknowledged only once the 192 has read them. */
+    phone_sends(AA_CH_VIDEO, 0, config, sizeof config, 1);
+    video_message(39000);
+    picture[10] = picture[11] = picture[12] = 0;
+    picture[13] = 1;
+    picture[14] = 0x65;
+    for (i = 10; i < 39010; i++)
+        sum = (uint8_t)(sum + picture[i]);
+    phone_sends(AA_CH_VIDEO, 0, picture, 39010, 3);
+    run_feed();
+    CHECK(feed.videos_in == 2 && feed.streaming && phone.acks == 0);
+    CHECK(stream.config_len == sizeof config - 2);
+    unit_reads();
+    CHECK(unit_blocks[AALINK_CONFIG] == 1 && unit_blocks[AALINK_PICTURE] == (39000 + AALINK_PAYLOAD - 1) / AALINK_PAYLOAD);
+    CHECK(unit_picture_bytes == 39000 && unit_picture_sum == sum && unit_starts == 2 && unit_keys == 1);
+    run_feed();
+    CHECK(phone.acks == 2 && feed.acked == 2);
+
+    /* More than the ring holds, sent at once: the phone's bytes wait, and
+     * nothing is lost. */
+    for (k = 0; k < 3; k++)
+        phone_sends(AA_CH_VIDEO, 0, picture, 39010, 3);
+    run_feed();
+    CHECK(feed.pauses > 0 && !aa_feed_idle(&feed) && feed.videos_in < 5);
+    for (k = 0; k < 20 && feed.videos_in < 5; k++) {
+        unit_reads();
+        run_feed();
+    }
+    unit_reads();
+    run_feed();
+    CHECK(feed.videos_in == 5 && feed.dropped_bytes == 0 && aa_feed_idle(&feed));
+    CHECK(unit_picture_bytes == 4 * 39000 && phone.acks == 5);
+
+    /* The 192 two pictures behind: the acknowledgement waits ACK_HOLD_MS
+     * (the test's clock goes a millisecond a look). */
+    aastream_request(&stream, AALINK_INPUT_FIRST + AALINK_IN_CODE(1, AALINK_IN_BACKLOG | 2));
+    phone_sends(AA_CH_VIDEO, 0, picture, 1010, 1);
+    run_feed();
+    unit_reads();
+    aa_feed_run(&feed);
+    phone_runs();
+    CHECK(feed.backlog == 2 && phone.acks == 5);
+    for (k = 0; k < ACK_HOLD_MS && phone.acks == 5; k++)
+        run_feed();
+    CHECK(phone.acks == 6 && k > ACK_HOLD_MS / 8);
+    aastream_request(&stream, AALINK_INPUT_FIRST + AALINK_IN_CODE(2, AALINK_IN_BACKLOG | 0));
+
+    /* Sound: into the stream while the 192 reads, dropped when it does
+     * not. */
+    memset(pcm, 0x11, sizeof pcm);
+    pcm[0] = 0;
+    pcm[1] = AA_AV_MEDIA_TIMESTAMP;
+    phone_sends(AA_CH_MEDIA_AUDIO, 0, pcm, sizeof pcm, 1);
+    run_feed();
+    unit_reads();
+    CHECK(unit_blocks[AALINK_SOUND_MEDIA] == (2048 + AALINK_PAYLOAD - 1) / AALINK_PAYLOAD && feed.sound_dropped == 0);
+    unit_is_reading = 0;
+    phone_sends(AA_CH_MEDIA_AUDIO, 0, pcm, sizeof pcm, 1);
+    run_feed();
+    CHECK(feed.sound_dropped == 1 && stream.tail == stream.head);
+    unit_is_reading = 1;
+
+    /* The 192's ENTER, and its asking for a key frame. */
+    k = phone.others;
+    aastream_request(&stream, AALINK_INPUT_FIRST + AALINK_IN_CODE(3, (AALINK_KEY_ENTER << 1) | 1));
+    run_feed();
+    CHECK(phone.inputs == 1);
+    aastream_request(&stream, AALINK_CTL_KEY);
+    run_feed();
+    CHECK(phone.others > k);
+
+    /* The phone goes with a picture half sent. */
+    {
+        uint32_t head = stream.head;
+        static uint8_t in[20000];
+        phone_sends(AA_CH_VIDEO, 0, picture, 39010, 3);
+        memcpy(in, to_hu.b, sizeof in);
+        to_hu.len = 0;
+        aa_feed_give(&feed, in, sizeof in);
+        aa_feed_run(&feed);
+        CHECK(feed.video_open);
+        aa_feed_close(&feed);
+        CHECK(feed.ses.state == AA_S_IDLE && !(stream.state & AALINK_PHONE) && !stream.ch[0].in_message);
+        CHECK(stream.head != head && aa_feed_idle(&feed));
+    }
+    aa_tls_free(&phone.tls);
+    printf("feed: video into the stream and acknowledged as the 192 reads, the phone held back for room, "
+           "an acknowledgement held %d ms, sound, input, a phone gone mid-picture\n", ACK_HOLD_MS);
+}
+
 int main(int argc, char **argv)
 {
     size_t cl, kl;
@@ -382,6 +559,8 @@ int main(int argc, char **argv)
     CHECK(ses.state == AA_S_FAILED && !states[AA_S_AUTHED]);
     aa_session_close(&ses);
     aa_tls_free(&phone.tls);
+
+    feed_tests(argv[1], &c);
 
     free(cert);
     free(key);

@@ -36,9 +36,10 @@ if [ -f "$mbedtls/library/aes.c" ] && command -v openssl >/dev/null 2>&1; then
     # The whole session (src/aa_session.c) against a stand-in phone.
     ${CC:-cc} -O2 -Wall -Wextra -Wno-unused-parameter -DAA_TLS_HOST_TEST '-DMBEDTLS_CONFIG_FILE="mbedtls_config.h"' \
         -I"$src" -I"$mbedtls/include" \
-        -o "$here/../work/session_host" "$here/session_host.c" "$src/aa_session.c" "$src/aa_tls.c" "$src/aa_hu.c" "$src/aap.c" \
+        -o "$here/../work/session_host" "$here/session_host.c" "$src/aa_feed.c" "$src/aa_streamsink.c" "$src/aastream.c" \
+        "$src/aa_session.c" "$src/aa_tls.c" "$src/aa_hu.c" "$src/aap.c" \
         "$mbedtls"/library/*.c
-    "$here/../work/session_host" "$certs" | grep -v '^handshake\|^Android Auto answered\|^sending to the phone failed'
+    "$here/../work/session_host" "$certs" | grep -v '^handshake\|^Android Auto answered\|^sending to the phone failed\|^video arriving'
 else
     echo "tls: no mbedTLS in the pico-sdk (run sdbridge/build.sh) or no openssl: not run"
 fi

@@ -94,7 +94,7 @@ if (AA_CERT_HEADER)
     # ring of blocks for the 192 (LINK_BLOCKS).  No default alarm pool:
     # its interrupt would be on core 0, the command line's.
     add_executable(sdlink src/sdlink.c src/card.c src/volume.c src/crc.c src/aastream.c
-        src/aa_tls.c src/aa_hu.c src/aap.c src/aoa.c src/status.c)
+        src/aa_feed.c src/aa_streamsink.c src/aa_session.c src/aa_tls.c src/aa_hu.c src/aap.c src/aoa.c src/status.c)
     pico_generate_pio_header(sdlink ${CMAKE_CURRENT_LIST_DIR}/src/sd.pio OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/link)
     target_include_directories(sdlink PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src ${AA_CERT_DIR})
     target_compile_options(sdlink PRIVATE -Wall -Wextra -O2)
