@@ -1,14 +1,14 @@
-/* The bridge's phone side on an ESP32-S3: the phone on the chip's own
- * USB port (accessory mode, main/usb_aoa.c) or, with a Wi-Fi network
- * configured, its head unit server over TCP (main/net.c), and the
- * session the bridge's own (src/aa_feed.c, as SDLINK.UF2 on the RP2040
- * has it).
+/* The bridge on an ESP32-S3, all of it: the phone over Wi-Fi (its head
+ * unit server over TCP, main/net.c) or on the chip's own USB port
+ * (accessory mode, main/usb_aoa.c), the session the bridge's own
+ * (src/aa_feed.c, as SDLINK.UF2 on the RP2040 has it), its video and
+ * sound in the stream of AALINK.BIN (src/aastream.c), and the SD card
+ * the unit reads that from (main/sdcard.c), which has the second core
+ * to itself.  Everything else is on the first.
  *
- * This is the desk test, as SDSTREAM.UF2 is on the RP2040: what the
- * phone sends is counted and acknowledged, not kept (the sink below
- * takes everything and says the 192 has read it), and once a second the
- * log has the video's rate, the sound's, the link's, and the time spent
- * decrypting.  The log is on UART0, the board's USB-serial port. */
+ * Once a second the log has the video's rate, the link's, the time
+ * spent decrypting, the stream and the card.  The log is on UART0, the
+ * board's USB-serial port. */
 #include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -16,7 +16,12 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "lwip/sockets.h"
+#include "esp_attr.h"
 #include "aa_feed.h"
+#include "aa_streamsink.h"
+#include "aastream.h"
+#include "volume.h"
+#include "sdcard.h"
 #include "usb_aoa.h"
 #include "net.h"
 #include "hu_cert.h"
@@ -34,50 +39,49 @@ static uint8_t *tcp_buf;
 
 static uint64_t link_bytes;
 
-/* ---- a sink that keeps nothing -------------------------------------- */
+/* ---- the stream, between the session (this core) and the card ------- */
 
-static struct {
-    uint32_t videos, sounds;
-    uint64_t video_bytes, sound_bytes;
-    uint32_t keys;
-} got;
+#ifndef LINK_BLOCKS
+#define LINK_BLOCKS 128
+#endif
+static struct aastream stream;
+static struct aa_streamsink streamsink;
+static uint32_t link_sector;          /* AALINK.BIN's first sector */
+/* When the unit last started a read of the window (microseconds, the
+ * low 32 bits). */
+static volatile uint32_t last_window_read;
 
-static uint32_t sink_room(void *ctx) { return 1u << 20; }
-static void sink_begin(void *ctx, int ch, int type, int key)
+/* From the card's loop, on its core (sdcard.h). */
+static void IRAM_ATTR link_words(uint32_t index, uint32_t *w)
 {
-    if (ch == 0 && key)
-        got.keys++;
-}
-static uint32_t sink_add(void *ctx, int ch, const uint8_t *p, uint32_t n)
-{
-    if (ch == 0)
-        got.video_bytes += n;
-    else
-        got.sound_bytes += n;
-    return n;
-}
-static void sink_end(void *ctx, int ch)
-{
-    if (ch == 0)
-        got.videos++;
-    else
-        got.sounds++;
-}
-static uint32_t sink_videos_out(void *ctx) { return got.videos; }
-static uint32_t sink_key_asked(void *ctx) { return 0; }
-static int sink_input_take(void *ctx, uint16_t *code) { return 0; }
-static int sink_reading(void *ctx) { return 1; }
-static void sink_phone(void *ctx, int up, int width, int height)
-{
-    got.videos = 0;
-    if (up)
-        printf("session up: video %dx%d\n", width, height);
+    aastream_sector(&stream, index, w);
 }
 
-static const struct aa_sink null_sink = {
-    NULL, sink_room, sink_begin, sink_add, sink_end, sink_videos_out, sink_key_asked, sink_input_take, sink_reading,
-    sink_phone,
-};
+static void IRAM_ATTR card_read(uint32_t sector)
+{
+    uint32_t index;
+    if (sector < link_sector)
+        return;
+    /* A read of AALINK.BIN's input or key sector: its event.  A read of
+     * the window: the unit has what came before. */
+    aastream_request(&stream, sector - link_sector);
+    if (aastream_in_window(sector - link_sector, &index)) {
+        aastream_consumed(&stream, index);
+        last_window_read = (uint32_t)esp_timer_get_time();
+    }
+}
+
+static void IRAM_ATTR card_sent(uint32_t sector)
+{
+    uint32_t index;
+    if (sector >= link_sector && aastream_in_window(sector - link_sector, &index))
+        aastream_went_out(&stream, aastream_seq(&stream, index));
+}
+
+static int reading(void *ctx)
+{
+    return (uint32_t)esp_timer_get_time() - last_window_read < 1000000u;
+}
 
 /* ---- the link -------------------------------------------------------- */
 
@@ -125,27 +129,24 @@ static void on_event(void *ctx, int event)
 
 static void stats(void)
 {
-    static uint64_t t_last, last_link, last_video, last_sound, last_decrypt;
-    static uint32_t last_videos, last_keys;
+    static uint64_t t_last, last_link, last_decrypt;
+    static uint32_t last_videos;
     uint64_t now = link_us(NULL), dt = (now - t_last) / 1000;
     if (dt < 1000)
         return;
     if (feed->ses.state == AA_S_AUTHED && (feed->streaming || link_bytes != last_link))
-        printf("%4lus: video %lu fps, %lu KB/s, %lu key; sound %lu KB/s; %s %lu KB/s; decrypting %lu%% of the time; "
-               "%lu acks, %lu pings; heap %lu\n",
-            (unsigned long)((now - feed->ses.t_auth) / 1000000), (unsigned long)((got.videos - last_videos) * 1000 / dt),
-            (unsigned long)((got.video_bytes - last_video) * 1000 / 1024 / dt), (unsigned long)(got.keys - last_keys),
-            (unsigned long)((got.sound_bytes - last_sound) * 1000 / 1024 / dt), via == LINK_TCP ? "TCP" : "USB",
-            (unsigned long)((link_bytes - last_link) * 1000 / 1024 / dt),
+        printf("%4lus: video %lu fps; %s %lu KB/s; decrypting %lu%% of the time; %lu acks; stream %lu of %u blocks, "
+               "%lu pauses, sound dropped %lu; heap %lu\n",
+            (unsigned long)((now - feed->ses.t_auth) / 1000000), (unsigned long)((feed->videos_in - last_videos) * 1000 / dt),
+            via == LINK_TCP ? "TCP" : "USB", (unsigned long)((link_bytes - last_link) * 1000 / 1024 / dt),
             (unsigned long)((feed->ses.decrypt_us - last_decrypt) / 10 / dt), (unsigned long)feed->ses.hu.v.acks,
-            (unsigned long)feed->ses.hu.pings, (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+            (unsigned long)(stream.head - stream.tail), (unsigned)LINK_BLOCKS, (unsigned long)feed->pauses,
+            (unsigned long)feed->sound_dropped, (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    sdcard_report(0);
     t_last = now;
     last_link = link_bytes;
-    last_video = got.video_bytes;
-    last_sound = got.sound_bytes;
     last_decrypt = feed->ses.decrypt_us;
-    last_videos = got.videos;
-    last_keys = got.keys;
+    last_videos = feed->videos_in;
 }
 
 /* ---- the phone's task ------------------------------------------------ */
@@ -161,11 +162,29 @@ static void phone_task(void *arg)
         printf("no memory for the session (%u bytes): is the PSRAM there?\n", (unsigned)sizeof *feed);
         vTaskDelete(NULL);
     }
-    feed->event = on_event;
-    aa_feed_init(feed, link_send, link_us, NULL, &cert, AA_MAX_UNACKED, &null_sink);
+    {
+        /* The stream's ring in the chip's own RAM, where the card's
+         * loop reads it without the cache. */
+        static uint8_t ring[LINK_BLOCKS][512] __attribute__((aligned(4)));
+        struct aa_sink sink;
+        aastream_init(&stream, ring, LINK_BLOCKS);
+        aa_streamsink_init(&streamsink, &stream, reading, NULL);
+        aa_streamsink_sink(&streamsink, &sink);
+        feed->event = on_event;
+        aa_feed_init(feed, link_send, link_us, NULL, &cert, AA_MAX_UNACKED, &sink);
+    }
+    link_sector = volume_link_sector();
+    volume_link = link_words;
     usb_aoa_start();
     wifi = net_start();
-    printf("s3phone: waiting for a phone on the USB port%s\n", wifi ? ", or its head unit server on the network" : "");
+    {
+        /* The card last: its loop takes the second core for good. */
+        static const struct sdcard_hooks hooks = { card_read, card_sent };
+        sdcard_start(&hooks);
+    }
+    printf("s3bridge: an SD card with AALINK.BIN (the phone's video, %u blocks of RAM) on GPIO %d/%d/%d; waiting for a phone "
+           "on the USB port%s\n", (unsigned)LINK_BLOCKS, SDCARD_PIN_CMD, SDCARD_PIN_CLK, SDCARD_PIN_DAT0,
+        wifi ? ", or its head unit server on the network" : "");
     for (;;) {
         int busy = via != LINK_NONE && (!aa_feed_idle(feed) || (via == LINK_USB && usb_aoa_in_done));
         usb_aoa_poll(busy ? 0 : 1);
@@ -227,5 +246,5 @@ static void phone_task(void *arg)
 void app_main(void)
 {
     /* The handshake's key operations want a deep stack. */
-    xTaskCreatePinnedToCore(phone_task, "phone", 16384, NULL, 5, NULL, 1);
+    xTaskCreatePinnedToCore(phone_task, "phone", 16384, NULL, 5, NULL, 0);
 }

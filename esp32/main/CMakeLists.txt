@@ -4,8 +4,12 @@
 # repository).
 set(src ${CMAKE_CURRENT_LIST_DIR}/../../src)
 idf_component_register(
-    SRCS main.c usb_aoa.c net.c
+    SRCS main.c usb_aoa.c net.c sdcard.c
          ${src}/aa_feed.c ${src}/aa_session.c ${src}/aa_tls.c ${src}/aa_hu.c ${src}/aap.c
+         ${src}/aa_streamsink.c ${src}/aastream.c ${src}/card.c ${src}/crc.c ${src}/volume.c
     INCLUDE_DIRS . ${src} ${AA_CERT_DIR}
-    PRIV_REQUIRES usb mbedtls esp_timer esp_wifi esp_netif nvs_flash lwip)
-target_compile_definitions(${COMPONENT_LIB} PRIVATE AAP_MESSAGE_MAX=8192 AA_TLS_OUT_BUF=4096)
+    PRIV_REQUIRES usb mbedtls esp_timer esp_wifi esp_netif nvs_flash lwip esp_driver_gpio esp_hw_support hal soc)
+target_compile_definitions(${COMPONENT_LIB} PRIVATE AAP_MESSAGE_MAX=8192 AA_TLS_OUT_BUF=4096 VOLUME_PROGRAM_ROOM=512)
+# What the card's loop calls runs from RAM, so that no read of the flash
+# holds an answer up.
+target_compile_options(${COMPONENT_LIB} PRIVATE -include esp_attr.h -DBRIDGE_RAM=IRAM_ATTR)
