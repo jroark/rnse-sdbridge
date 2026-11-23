@@ -21,3 +21,12 @@ CONFIG_MBEDTLS_HARDWARE_AES=y
 CONFIG_MBEDTLS_HARDWARE_SHA=y
 CONFIG_MBEDTLS_HARDWARE_MPI=y
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
+# The card's loop has the second core to itself (main/sdcard.c): its idle
+# task never runs, and everything else is kept on the first.
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0=y
+CONFIG_GDMA_CTRL_FUNC_IN_IRAM=y
+# The chip's own RAM is the card's and the stream's: Wi-Fi's, lwIP's and
+# TLS's buffers go to the PSRAM where they can.
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
