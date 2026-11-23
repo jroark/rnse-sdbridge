@@ -34,34 +34,23 @@
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
-#include "aap.h"
-#include "aa_tls.h"
-#include "aa_hu.h"
-#include "mbedtls/error.h"
+#include "aa_session.h"
 #include "hu_cert.h"
 
 #ifndef AA_MAX_UNACKED
 #define AA_MAX_UNACKED 1
 #endif
 
-static struct aap_reader reader;
-static struct aap_assembler msg;
-static struct aa_tls tls;
-static struct aa_hu hu;
-static uint8_t tls_out[AA_TLS_BUF];
-static uint8_t frame[AA_TLS_BUF + 8];
-static uint8_t plain[AAP_FRAME_MAX];
+static struct aa_session ses;
+#define hu ses.hu
 
-enum { VERSION, HANDSHAKE, AUTHED, DISCOVERED, STREAMING, FAILED };
-static int state = VERSION;
+static int streaming;
 static int sock = -1;
 
-static uint64_t net_bytes, decrypt_us;
-static uint32_t frames_in;
 static int sound_seen;
-static uint32_t t_auth, t_video, t_stats;
+static uint32_t t_video, t_stats;
 static struct {
-    uint64_t net, video, decrypt, audio;
+    uint64_t net, video, audio;
     uint32_t messages, idr, frames;
 } last;
 
@@ -78,32 +67,22 @@ int mbedtls_hardware_poll(void *data, unsigned char *out, size_t len, size_t *ol
     return r == (ssize_t)len ? 0 : -1;
 }
 
-static uint64_t us(void)
+static uint64_t us(void *ctx)
 {
     struct timespec t;
+    (void)ctx;
     clock_gettime(CLOCK_MONOTONIC, &t);
     return (uint64_t)t.tv_sec * 1000000u + (uint64_t)t.tv_nsec / 1000u;
 }
 
 static uint32_t ms(void)
 {
-    return (uint32_t)(us() / 1000u);
+    return (uint32_t)(us(NULL) / 1000u);
 }
 
-static void fail(const char *why, int r)
+static int send_all(void *ctx, const uint8_t *p, uint32_t n)
 {
-    char text[100];
-    if (r) {
-        mbedtls_strerror(r, text, sizeof text);
-        printf("%s: %s (-0x%04x)\n", why, text, (unsigned)-r);
-    } else {
-        printf("%s\n", why);
-    }
-    state = FAILED;
-}
-
-static int send_all(const uint8_t *p, size_t n)
-{
+    (void)ctx;
     while (n) {
         ssize_t k = send(sock, p, n, 0);
         if (k < 0 && errno == EINTR)
@@ -111,89 +90,9 @@ static int send_all(const uint8_t *p, size_t n)
         if (k <= 0)
             return -1;
         p += k;
-        n -= (size_t)k;
+        n -= (uint32_t)k;
     }
     return 0;
-}
-
-/* What mbedTLS wrote, as a handshake message. */
-static int send_handshake(const uint8_t *p, size_t n)
-{
-    size_t len = n + 2;
-    if (!n)
-        return 0;
-    frame[0] = 0;
-    frame[1] = AAP_FIRST | AAP_LAST;
-    frame[2] = (uint8_t)(len >> 8);
-    frame[3] = (uint8_t)len;
-    frame[4] = 0x00;
-    frame[5] = AAP_SSL_HANDSHAKE;
-    memcpy(frame + 6, p, n);
-    printf("handshake: %u bytes to the phone\n", (unsigned)n);
-    return send_all(frame, len + 4);
-}
-
-static int send_encrypted(uint8_t channel, uint8_t flags, const uint8_t *p, uint32_t n)
-{
-    size_t rl;
-    int r = aa_tls_encrypt(&tls, p, n, tls_out, sizeof tls_out, &rl);
-    if (r) {
-        fail("encrypting", r);
-        return -1;
-    }
-    if (send_all(frame, (size_t)aap_frame(frame, channel, (uint8_t)(flags | AAP_ENCRYPTED), tls_out, (uint16_t)rl))) {
-        fail("sending to the phone failed", 0);
-        return -1;
-    }
-    return 0;
-}
-
-static void flush(void)
-{
-    unsigned i;
-    for (i = 0; i < hu.nout && state != FAILED; i++)
-        send_encrypted(hu.out[i].channel, hu.out[i].flags, hu.out[i].data, hu.out[i].len);
-    hu.nout = 0;
-}
-
-static void handshake(const uint8_t *in, size_t n)
-{
-    size_t out_len;
-    uint32_t t0 = ms();
-    int r = aa_tls_handshake(&tls, in, n, tls_out, &out_len);
-    printf("handshake: %u bytes from the phone, %lu ms here\n", (unsigned)n, (unsigned long)(ms() - t0));
-    if (out_len && send_handshake(tls_out, out_len)) {
-        fail("sending to the phone failed", 0);
-        return;
-    }
-    if (r == MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE) {
-        int a = aa_tls_alert(&tls);
-        printf("the phone ended the handshake with alert %d%s\n", a,
-            a == 42 ? " (bad certificate)" : a == 48 ? " (unknown CA)" : a == 46 ? " (certificate unknown)" :
-            a == 40 ? " (handshake failure)" : a == 43 ? " (unsupported certificate)" : "");
-        state = FAILED;
-        return;
-    }
-    if (r < 0) {
-        fail("handshake", r);
-        return;
-    }
-    if (r == 1) {
-        uint8_t payload[8];
-        int k = aap_auth_complete(payload);
-        printf("handshake done: %s\n", aa_tls_suite(&tls));
-        if (send_all(frame, (size_t)aap_frame(frame, 0, 0, payload, (uint16_t)k))) {
-            fail("sending to the phone failed", 0);
-            return;
-        }
-        printf("authentication complete sent\n");
-        state = AUTHED;
-        t_auth = t_stats = ms();
-        last.net = net_bytes;
-        last.decrypt = decrypt_us;
-        last.frames = frames_in;
-        aa_hu_init(&hu, AA_MAX_UNACKED);
-    }
 }
 
 /* The text in a protocol buffer, a line a field (one level down too). */
@@ -220,80 +119,44 @@ static void show_strings(const uint8_t *p, uint32_t n, int depth)
     }
 }
 
-static void session_frame(const struct aap_frame *f, const uint8_t *p, uint32_t n)
+static void on_media(void *ctx, uint8_t channel, uint8_t flags, const uint8_t *p, uint32_t n)
 {
-    if (aa_hu_media_channel(f->channel) && !(f->flags & AAP_CONTROL) &&
-        aa_hu_media_frame(&hu, f->channel, f->flags, p, n)) {
-        if (f->channel != AA_CH_VIDEO) {
-            if (!sound_seen) {
-                sound_seen = 1;
-                printf("sound arriving on channel %d\n", f->channel);
-            }
-        } else if (state != STREAMING) {
-            state = STREAMING;
-            t_video = ms();
-            printf("video frames arriving, %lu ms after authentication\n", (unsigned long)(t_video - t_auth));
+    (void)ctx, (void)flags, (void)p, (void)n;
+    if (channel != AA_CH_VIDEO) {
+        if (!sound_seen) {
+            sound_seen = 1;
+            printf("sound arriving on channel %d\n", channel);
         }
-        if (hu.v.config_new) {
-            hu.v.config_new = 0;
-            printf("H.264 profile %d (%s), constraints %02x, level %d.%d\n", hu.v.profile,
-                hu.v.profile == 66 ? "Baseline" : hu.v.profile == 77 ? "Main" : hu.v.profile == 100 ? "High" : "?",
-                hu.v.constraints & 0xff, hu.v.level / 10, hu.v.level % 10);
-        }
-    } else if (aap_assemble(&msg, f->flags, p, n) == 1) {
-        if (state == AUTHED && f->channel == 0 && msg.len >= 2 && msg.buf[1] == AAP_SERVICE_DISCOVERY_REQUEST) {
-            printf("the phone's service discovery request:\n");
-            show_strings(msg.buf + 2, msg.len - 2, 0);
-            state = DISCOVERED;
-        }
-        aa_hu_message(&hu, f->channel, f->flags, msg.buf, msg.len);
+    } else if (!streaming) {
+        streaming = 1;
+        t_video = ms();
+        printf("video frames arriving, %lu ms after authentication\n", (unsigned long)(t_video - (uint32_t)(ses.t_auth / 1000)));
     }
-    flush();
+    if (hu.v.config_new) {
+        hu.v.config_new = 0;
+        printf("H.264 profile %d (%s), constraints %02x, level %d.%d\n", hu.v.profile,
+            hu.v.profile == 66 ? "Baseline" : hu.v.profile == 77 ? "Main" : hu.v.profile == 100 ? "High" : "?",
+            hu.v.constraints & 0xff, hu.v.level / 10, hu.v.level % 10);
+    }
 }
 
-static void frames(void)
+static void on_message(void *ctx, uint8_t channel, const uint8_t *m, uint32_t n)
 {
-    struct aap_frame f;
-    uint16_t major, minor, st;
-    while (state != FAILED && aap_next(&reader, &f)) {
-        frames_in++;
-        if (state == VERSION) {
-            if (aap_version_response(&f, &major, &minor, &st) == 0) {
-                printf("Android Auto answered: version %u.%u, %s\n", major, minor, st == 0 ? "they match" : "they do not match");
-                if (st != 0) {
-                    fail("version mismatch", 0);
-                    return;
-                }
-                state = HANDSHAKE;
-                if (aa_tls_init(&tls, 0, hu_cert_pem, sizeof hu_cert_pem, HU_CERT_WIRE ? hu_cert_wire : NULL,
-                                HU_CERT_WIRE ? sizeof hu_cert_wire : 0, hu_key_pem, sizeof hu_key_pem, NULL, 0)) {
-                    fail("the certificate or key the build was given did not parse", 0);
-                    return;
-                }
-                handshake(NULL, 0);
-            }
-            continue;
-        }
-        if (f.flags & AAP_ENCRYPTED) {
-            size_t n;
-            uint64_t t0 = us();
-            int r = aa_tls_decrypt(&tls, f.payload, f.length, plain, sizeof plain, &n);
-            decrypt_us += us() - t0;
-            if (r) {
-                fail("decrypting", r);
-                return;
-            }
-            if (state >= AUTHED)
-                session_frame(&f, plain, (uint32_t)n);
-            continue;
-        }
-        if (aap_assemble(&msg, f.flags, f.payload, f.length) != 1)
-            continue;
-        if (state == HANDSHAKE && f.channel == 0 && msg.len >= 2 && msg.buf[0] == 0 && msg.buf[1] == AAP_SSL_HANDSHAKE)
-            handshake(msg.buf + 2, msg.len - 2);
-        else if (msg.len >= 2)
-            printf("message %02x%02x on channel %d, %lu bytes, not encrypted\n", msg.buf[0], msg.buf[1], f.channel,
-                (unsigned long)msg.len);
+    (void)ctx;
+    if (channel == 0 && n >= 2 && m[0] == 0 && m[1] == AAP_SERVICE_DISCOVERY_REQUEST) {
+        printf("the phone's service discovery request:\n");
+        show_strings(m + 2, n - 2, 0);
+    }
+}
+
+static void on_state(void *ctx, int state)
+{
+    (void)ctx;
+    if (state == AA_S_AUTHED) {
+        printf("authentication complete sent\n");
+        t_stats = ms();
+        last.net = ses.bytes_in;
+        last.frames = ses.frames_in;
     }
 }
 
@@ -301,33 +164,32 @@ static void stats(int final)
 {
     uint32_t now = ms(), dt = now - t_stats;
     const struct aa_hu_video *v = &hu.v;
-    if (state < AUTHED || (state == FAILED && !v->messages))
+    if (ses.state != AA_S_AUTHED && !v->messages)
         return;
     if (final) {
         printf("summary: %lu video frames (%lu key frames) in %lu s, %lu KB, largest %lu bytes, %lu acknowledged; "
                "sound %lu KB in %lu messages; network %lu KB\n",
             (unsigned long)v->messages, (unsigned long)v->idr, (unsigned long)(v->messages ? (now - t_video) / 1000 : 0),
             (unsigned long)(v->bytes / 1024), (unsigned long)v->largest, (unsigned long)v->acks,
-            (unsigned long)(hu.audio_bytes / 1024), (unsigned long)hu.audio_messages, (unsigned long)(net_bytes / 1024));
+            (unsigned long)(hu.audio_bytes / 1024), (unsigned long)hu.audio_messages, (unsigned long)(ses.bytes_in / 1024));
         return;
     }
     if (dt < 1000)
         return;
-    if (state == STREAMING || sound_seen || net_bytes != last.net)
+    if (streaming || sound_seen || ses.bytes_in != last.net)
         printf("%4lus: video %lu fps, %lu KB/s, %lu key; sound %lu KB/s; network %lu KB/s, %lu frames; "
                "largest %lu bytes, %lu acks, %lu pings\n",
-            (unsigned long)((now - t_auth) / 1000), (unsigned long)((v->messages - last.messages) * 1000 / dt),
+            (unsigned long)((now - (uint32_t)(ses.t_auth / 1000)) / 1000), (unsigned long)((v->messages - last.messages) * 1000 / dt),
             (unsigned long)((v->bytes - last.video) * 1000 / 1024 / dt), (unsigned long)(v->idr - last.idr),
             (unsigned long)((hu.audio_bytes - last.audio) * 1000 / 1024 / dt),
-            (unsigned long)((net_bytes - last.net) * 1000 / 1024 / dt), (unsigned long)(frames_in - last.frames),
+            (unsigned long)((ses.bytes_in - last.net) * 1000 / 1024 / dt), (unsigned long)(ses.frames_in - last.frames),
             (unsigned long)v->largest, (unsigned long)v->acks, (unsigned long)hu.pings);
-    last.net = net_bytes;
+    last.net = ses.bytes_in;
     last.video = v->bytes;
     last.audio = hu.audio_bytes;
-    last.decrypt = decrypt_us;
     last.messages = v->messages;
     last.idr = v->idr;
-    last.frames = frames_in;
+    last.frames = ses.frames_in;
     t_stats = now;
     fflush(stdout);
 }
@@ -386,8 +248,7 @@ static int open_listen(const char *port)
 int main(int argc, char **argv)
 {
     static uint8_t in[65536];
-    uint8_t m[16];
-    int n, one = 1, listening;
+    int one = 1, listening;
     uint32_t seconds, t_open;
     const char *port;
 
@@ -409,17 +270,18 @@ int main(int argc, char **argv)
     setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
     printf("connected; certificate: %s\n", HU_CERT_WIRE ? "dates with a time zone, sent as it is" : "as given");
 
-    aap_reader_init(&reader);
-    aap_assembler_init(&msg);
-    n = aap_version_request(m);
-    if (send_all(m, (size_t)n)) {
-        printf("sending the version request failed\n");
-        return 1;
+    {
+        struct aa_session_io io = { NULL, send_all, us, on_media, on_message, on_state };
+        struct aa_session_cert cert = { hu_cert_pem, sizeof hu_cert_pem, HU_CERT_WIRE ? hu_cert_wire : NULL,
+                                        HU_CERT_WIRE ? sizeof hu_cert_wire : 0, hu_key_pem, sizeof hu_key_pem };
+        aa_session_init(&ses, &io, &cert, AA_MAX_UNACKED, 0);
     }
+    if (aa_session_open(&ses))
+        return 1;
     printf("version request sent\n");
     t_open = t_stats = ms();
 
-    while (state != FAILED) {
+    while (ses.state != AA_S_FAILED) {
         struct pollfd p = { sock, POLLIN, 0 };
         int r = poll(&p, 1, 200);
         if (r < 0 && errno != EINTR)
@@ -435,20 +297,18 @@ int main(int argc, char **argv)
                 printf("reading from the phone: %s\n", strerror(errno));
                 break;
             }
-            net_bytes += (uint64_t)len;
-            for (at = 0; at < (size_t)len && state != FAILED; at += k) {
+            for (at = 0; at < (size_t)len; at += k) {
                 k = (size_t)len - at < AAP_FEED_MAX ? (size_t)len - at : AAP_FEED_MAX;
-                if (aap_feed(&reader, in + at, (uint32_t)k)) {
-                    fail("the phone's bytes make no frames", 0);
+                if (aa_session_feed(&ses, in + at, (uint32_t)k))
                     break;
-                }
-                frames();
+                while (aa_session_step(&ses))
+                    ;
             }
         }
         stats(0);
-        if (state == STREAMING && ms() - t_video >= seconds * 1000)
+        if (streaming && ms() - t_video >= seconds * 1000)
             break;
-        if (state != STREAMING && ms() - t_open >= (seconds + 60) * 1000) {
+        if (!streaming && ms() - t_open >= (seconds + 60) * 1000) {
             printf("no video after %lu s\n", (unsigned long)(seconds + 60));
             break;
         }

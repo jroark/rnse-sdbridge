@@ -17,5 +17,5 @@ mkdir -p "$work/aa_tcp.d"
 python3 -I "$here/../pem2c.py" "$AA_CERT" "$AA_KEY" "$work/aa_tcp.d/hu_cert.h" >/dev/null
 ${CC:-cc} -O2 -Wall -Wextra -Wno-unused-parameter '-DMBEDTLS_CONFIG_FILE="mbedtls_config.h"' \
     -I"$src" -I"$mbedtls/include" -I"$work/aa_tcp.d" \
-    -o "$work/aa_tcp" "$here/aa_tcp.c" "$src/aa_tls.c" "$src/aa_hu.c" "$src/aap.c" "$mbedtls"/library/*.c
+    -o "$work/aa_tcp" "$here/aa_tcp.c" "$src/aa_session.c" "$src/aa_tls.c" "$src/aa_hu.c" "$src/aap.c" "$mbedtls"/library/*.c
 echo "$work/aa_tcp"
