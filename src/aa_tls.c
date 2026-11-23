@@ -1,6 +1,12 @@
+/* mbedTLS 2.28 (the pico-sdk's) and 3.x (ESP-IDF's): 3.x hides the
+ * fields of its structures, of which the alert just received is read
+ * here, takes a random number generator when it parses a key, and names
+ * the TLS versions otherwise. */
+#define MBEDTLS_ALLOW_PRIVATE_ACCESS
 #include <string.h>
 #include "aa_tls.h"
 #include "mbedtls/platform.h"
+#include "mbedtls/version.h"
 
 /* mbedTLS's socket, in memory. */
 static int send_cb(void *ctx, const unsigned char *buf, size_t len)
@@ -84,13 +90,23 @@ int aa_tls_init(struct aa_tls *t, int server, const char *cert, size_t cert_len,
         t->crt.raw.p = p;
         t->crt.raw.len = wire_len;
     }
+#if MBEDTLS_VERSION_MAJOR >= 3
+    if ((r = mbedtls_pk_parse_key(&t->key, (const unsigned char *)key, key_len, NULL, 0, mbedtls_ctr_drbg_random, &t->drbg)))
+        return r;
+#else
     if ((r = mbedtls_pk_parse_key(&t->key, (const unsigned char *)key, key_len, NULL, 0)))
         return r;
+#endif
     if ((r = mbedtls_ssl_config_defaults(&t->conf, server ? MBEDTLS_SSL_IS_SERVER : MBEDTLS_SSL_IS_CLIENT,
                                          MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT)))
         return r;
+#if MBEDTLS_VERSION_MAJOR >= 3
+    mbedtls_ssl_conf_min_tls_version(&t->conf, MBEDTLS_SSL_VERSION_TLS1_2);
+    mbedtls_ssl_conf_max_tls_version(&t->conf, MBEDTLS_SSL_VERSION_TLS1_2);
+#else
     mbedtls_ssl_conf_min_version(&t->conf, MBEDTLS_SSL_MAJOR_VERSION_3, MBEDTLS_SSL_MINOR_VERSION_3);
     mbedtls_ssl_conf_max_version(&t->conf, MBEDTLS_SSL_MAJOR_VERSION_3, MBEDTLS_SSL_MINOR_VERSION_3);
+#endif
     mbedtls_ssl_conf_rng(&t->conf, mbedtls_ctr_drbg_random, &t->drbg);
     if ((r = mbedtls_ssl_conf_own_cert(&t->conf, &t->crt, &t->key)))
         return r;

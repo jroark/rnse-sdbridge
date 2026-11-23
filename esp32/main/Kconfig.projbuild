@@ -1,0 +1,37 @@
+menu "Android Auto bridge"
+
+    config AA_WIFI_SSID
+        string "Wi-Fi network to join (empty: USB only)"
+        default ""
+        help
+            The network the phone is on, or the phone's own hotspot.  With
+            it the bridge also tries the phone's head unit server over TCP
+            (Android Auto's developer settings) while no phone is on USB.
+
+    config AA_WIFI_PASSWORD
+        string "Its password"
+        default ""
+
+    config AA_AP_SSID
+        string "Wi-Fi network to make, when none is joined (empty: none)"
+        default "rnse-aa"
+        help
+            The bridge is the access point and the phone joins it, as a
+            phone joins a wireless head unit.  The bridge then tries the
+            head unit server of each device that has joined.
+
+    config AA_AP_PASSWORD
+        string "Its password (8 characters at least; change the test default)"
+        default "rnsetest1234"
+
+    config AA_PHONE_HOST
+        string "The phone's address (empty: the network's gateway)"
+        default ""
+        help
+            On the phone's hotspot the phone is the gateway.
+
+    config AA_PHONE_PORT
+        int "The head unit server's port"
+        default 5277
+
+endmenu

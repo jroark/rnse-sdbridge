@@ -53,12 +53,9 @@
 #include "card.h"
 #include "volume.h"
 #include "status.h"
-#include "aap.h"
 #include "aoa.h"
-#include "aa_tls.h"
-#include "aa_hu.h"
-#include "aastream.h"
-#include "mbedtls/error.h"
+#include "aa_feed.h"
+#include "aa_streamsink.h"
 #include "hu_cert.h"
 
 #define CMD_PIN 3
@@ -74,9 +71,6 @@
 #ifndef LINK_BLOCKS
 #define LINK_BLOCKS 128
 #endif
-/* Room for a frame's payload, decrypted: below that, no frame is taken
- * from the phone's bytes until the 192 has read. */
-#define FRAME_ROOM (16384 + 64)
 
 #if CLK_PIN != 2
 #error "CLK_PIN in sd.pio and the wiring here disagree"
@@ -309,373 +303,77 @@ static void __not_in_flash_func(on_dma)(void)
 
 /* ---- the phone (core 1, main loop) --------------------------------- */
 
-static struct aap_reader reader;
-static struct aap_assembler msg;
-static struct aa_tls tls;
-static struct aa_hu hu;
-static uint8_t tls_out[AA_TLS_OUT_BUF];
-static uint8_t frame[AA_TLS_OUT_BUF + 8];
-static uint8_t plain[AAP_FRAME_MAX];
+/* The session and what it puts into the stream: src/aa_feed.c, with the
+ * stream in this chip (src/aa_streamsink.c) and the phone's accessory
+ * endpoints as its link. */
+static struct aa_feed feed;
+static struct aa_streamsink streamsink;
 
-enum { WAITING, SWITCHING, VERSION, HANDSHAKE, AUTHED, STREAMING, FAILED };
+enum { WAITING, SWITCHING, RUNNING, FAILED };
 static int state = WAITING;
 static uint8_t daddr;
 
-/* The video's acknowledgements still to send: the last block of each
- * message. */
-#define ACKQ 16
-static uint32_t ackq[ACKQ];
-static unsigned ack_in, ack_out;
-static int video_open;                /* a video message under way in the stream */
-static uint32_t dropped_bytes;
-/* The 192's pictures read and not yet decoded, as it last said. */
-static uint32_t backlog;
-/* When the oldest acknowledgement became due (ms, | 1; 0 none). */
-static uint32_t ack_since;
-#ifndef ACK_HOLD_MS
-#define ACK_HOLD_MS 250
-#endif
-static uint32_t key_asked_seen;
-
-/* The phone's bytes not yet made into frames: a USB buffer, taken a
- * piece at a time while the ring has room. */
-static const uint8_t *pend;
-static uint32_t pend_len, pend_at;
-static int paused;
-
-static uint64_t usb_bytes, decrypt_us;
-static uint32_t t_auth, t_stats;
-
-static void fail(const char *why, int r)
-{
-    char text[100];
-    if (r) {
-        mbedtls_strerror(r, text, sizeof text);
-        printf("%s: %s (-0x%04x)\n", why, text, (unsigned)-r);
-    } else {
-        printf("%s\n", why);
-    }
-    state = FAILED;
-    status_set(ST_FAIL);
-}
+static uint64_t usb_bytes;
+static uint32_t t_stats;
 
 static uint32_t ms(void)
 {
     return to_ms_since_boot(get_absolute_time());
 }
 
-static int send_handshake(const uint8_t *p, size_t n)
+static int link_send(void *ctx, const uint8_t *p, uint32_t n)
 {
-    size_t i, len = n + 2;
-    if (!n)
-        return 0;
-    if (len + 4 > sizeof frame)
-        return -1;
-    frame[0] = 0;
-    frame[1] = AAP_FIRST | AAP_LAST;
-    frame[2] = (uint8_t)(len >> 8);
-    frame[3] = (uint8_t)len;
-    frame[4] = 0x00;
-    frame[5] = AAP_SSL_HANDSHAKE;
-    for (i = 0; i < n; i++)
-        frame[6 + i] = p[i];
-    return aoa_send(daddr, frame, (uint32_t)(len + 4));
+    (void)ctx;
+    return aoa_send(daddr, p, n);
 }
 
-static int send_encrypted(uint8_t channel, uint8_t flags, const uint8_t *p, uint32_t n)
+static uint64_t link_us(void *ctx)
 {
-    size_t rl;
-    int r = aa_tls_encrypt(&tls, p, n, tls_out, sizeof tls_out, &rl);
-    if (r) {
-        fail("encrypting", r);
-        return -1;
-    }
-    if (aoa_send(daddr, frame, (uint32_t)aap_frame(frame, channel, (uint8_t)(flags | AAP_ENCRYPTED), tls_out, (uint16_t)rl))) {
-        fail("sending to the phone failed", 0);
-        return -1;
-    }
-    return 0;
+    (void)ctx;
+    return time_us_64();
 }
 
-static void flush(void)
+static int reading(void *ctx)
 {
-    unsigned i;
-    for (i = 0; i < hu.nout && state != FAILED; i++)
-        send_encrypted(hu.out[i].channel, hu.out[i].flags, hu.out[i].data, hu.out[i].len);
-    hu.nout = 0;
+    (void)ctx;
+    return time_us_32() - last_window_read < 1000000;
 }
 
-static void handshake(const uint8_t *in, size_t n)
+static void on_event(void *ctx, int event)
 {
-    size_t out_len;
-    uint32_t t0 = ms();
-    int r = aa_tls_handshake(&tls, in, n, tls_out, &out_len);
-    printf("handshake: %u bytes from the phone, %lu ms on the Pico\n", (unsigned)n, (unsigned long)(ms() - t0));
-    if (out_len && send_handshake(tls_out, out_len)) {
-        fail("sending to the phone failed", 0);
-        return;
-    }
-    if (r == MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE) {
-        printf("the phone ended the handshake with alert %d\n", aa_tls_alert(&tls));
-        state = FAILED;
-        status_set(ST_FAIL);
-        return;
-    }
-    if (r < 0) {
-        fail("handshake", r);
-        return;
-    }
-    if (r == 1) {
-        uint8_t payload[8];
-        int k = aap_auth_complete(payload);
-        printf("handshake done: %s\n", aa_tls_suite(&tls));
-        if (aoa_send(daddr, frame, (uint32_t)aap_frame(frame, 0, 0, payload, (uint16_t)k))) {
-            fail("sending to the phone failed", 0);
-            return;
-        }
-        state = AUTHED;
-        t_auth = t_stats = ms();
+    (void)ctx;
+    if (event == AA_S_VERSION || event == AA_S_HANDSHAKE)
+        status_set(ST_BUSY);
+    else if (event == AA_S_AUTHED)
         status_set(ST_WORKING);
-        aa_hu_init(&hu, AA_MAX_UNACKED);
-        hu.defer_video_acks = 1;
-        stream.state |= AALINK_PHONE;
-        stream.width = AA_HU_WIDTH;
-        stream.height = AA_HU_HEIGHT;
-        ack_in = ack_out = 0;
-        backlog = 0;
-        ack_since = 0;
-        key_asked_seen = stream.key_asked;
-    }
+    else if (event == AA_S_FAILED)
+        status_set(ST_FAIL);
 }
 
-/* A video frame of a media message, decrypted: into the stream. */
-static void video_frame(uint8_t flags, const uint8_t *p, uint32_t n)
+/* The USB failed: the session is given up, until the phone is unplugged. */
+static void fail(const char *why)
 {
-    if (flags & AAP_FIRST) {
-        uint16_t id = (uint16_t)(p[0] << 8 | p[1]);
-        int type = id == AA_AV_MEDIA ? AALINK_CONFIG : AALINK_PICTURE;
-        uint32_t skip = id == AA_AV_MEDIA ? 2 : 10;  /* the id, and the timestamp */
-        if (n < skip)
-            return;
-        p += skip;
-        n -= skip;
-        aastream_begin(&stream, 0, type, type == AALINK_PICTURE && aastream_is_key(p, n < 64 ? n : 64));
-        video_open = 1;
-    }
-    if (!video_open)
-        return;
-    {
-        uint32_t k = aastream_add(&stream, 0, p, n);
-        if (k < n)
-            dropped_bytes += n - k;   /* should not happen: room was looked at first */
-    }
-    if (flags & AAP_LAST) {
-        uint32_t last = aastream_end(&stream, 0);
-        video_open = 0;
-        if (ack_in - ack_out < ACKQ)
-            ackq[ack_in++ % ACKQ] = last;
-        else
-            aa_hu_video_ack(&hu);     /* (more than the phone may send ahead) */
-        if (state == AUTHED) {
-            state = STREAMING;
-            printf("video arriving, %lu ms after authentication\n", (unsigned long)(ms() - t_auth));
-        }
-    }
+    printf("%s\n", why);
+    aa_feed_close(&feed);
+    state = FAILED;
+    status_set(ST_FAIL);
 }
 
-/* A sound frame of a media message, decrypted: into the stream as its
- * channel's (aalink.h's sound types), or dropped, a message at a time,
- * when the 192 has read nothing for a second (no viewer: it would only
- * fill the ring) or the ring is nearly full (the pictures come first:
- * the phone's bytes are held back for them, never for sound). */
-static uint32_t sound_dropped;
-
-static void sound_frame(uint8_t channel, uint8_t flags, const uint8_t *p, uint32_t n)
-{
-    static int open[AASTREAM_CHANNELS];
-    int ch = channel - AA_CH_MEDIA_AUDIO + 1;
-    if (ch < 1 || ch > 3)
-        return;
-    if (flags & AAP_FIRST) {
-        uint16_t id = (uint16_t)(p[0] << 8 | p[1]);
-        uint32_t skip = id == AA_AV_MEDIA ? 2 : 10;  /* the id, and the timestamp */
-        if (n < skip)
-            return;
-        p += skip;
-        n -= skip;
-        open[ch] = time_us_32() - last_window_read < 1000000 && aastream_room(&stream) >= FRAME_ROOM + 8192;
-        if (open[ch])
-            aastream_begin(&stream, ch, AALINK_SOUND_MEDIA + ch - 1, 0);
-        else
-            sound_dropped++;
-    }
-    if (!open[ch])
-        return;
-    if (aastream_add(&stream, ch, p, n) < n)
-        dropped_bytes += n;
-    if (flags & AAP_LAST) {
-        (void)aastream_end(&stream, ch);
-        open[ch] = 0;
-    }
-}
-
-static void session_frame(const struct aap_frame *f, const uint8_t *p, uint32_t n)
-{
-    if (aa_hu_media_channel(f->channel) && !(f->flags & AAP_CONTROL) &&
-        aa_hu_media_frame(&hu, f->channel, f->flags, p, n)) {
-        if (f->channel == AA_CH_VIDEO)
-            video_frame(f->flags, p, n);
-        else
-            sound_frame(f->channel, f->flags, p, n);
-    } else if (aap_assemble(&msg, f->flags, p, n) == 1) {
-        aa_hu_message(&hu, f->channel, f->flags, msg.buf, msg.len);
-    }
-    flush();
-}
-
-static void one_frame(struct aap_frame *f)
-{
-    uint16_t major, minor, st;
-    if (state == VERSION) {
-        if (aap_version_response(f, &major, &minor, &st) == 0) {
-            printf("Android Auto answered: version %u.%u, %s\n", major, minor, st == 0 ? "they match" : "they do not match");
-            if (st != 0) {
-                fail("version mismatch", 0);
-                return;
-            }
-            state = HANDSHAKE;
-            status_set(ST_BUSY);
-            if (aa_tls_init(&tls, 0, hu_cert_pem, sizeof hu_cert_pem, HU_CERT_WIRE ? hu_cert_wire : NULL,
-                            HU_CERT_WIRE ? sizeof hu_cert_wire : 0, hu_key_pem, sizeof hu_key_pem, NULL, 0)) {
-                fail("the certificate or key the build was given did not parse", 0);
-                return;
-            }
-            handshake(NULL, 0);
-        }
-        return;
-    }
-    if (f->flags & AAP_ENCRYPTED) {
-        size_t n;
-        uint32_t t0 = time_us_32();
-        int r = aa_tls_decrypt(&tls, f->payload, f->length, plain, sizeof plain, &n);
-        decrypt_us += time_us_32() - t0;
-        if (r) {
-            fail("decrypting", r);
-            return;
-        }
-        if (state >= AUTHED)
-            session_frame(f, plain, (uint32_t)n);
-        return;
-    }
-    if (aap_assemble(&msg, f->flags, f->payload, f->length) != 1)
-        return;
-    if (state == HANDSHAKE && f->channel == 0 && msg.len >= 2 && msg.buf[0] == 0 && msg.buf[1] == AAP_SSL_HANDSHAKE)
-        handshake(msg.buf + 2, msg.len - 2);
-}
-
-/* The phone's bytes: frames taken while the ring has room for one. */
+/* The phone's bytes: a USB buffer to the feed when it has taken the
+ * last, the next transfer under way, into the other buffer, while this
+ * one is taken apart. */
 static void phone_bytes(void)
 {
-    struct aap_frame f;
-    if (!pend) {
-        if (!aoa_in_done)
-            return;
-        if (aoa_in_done < 0) {
-            fail("reading from the phone failed", 0);
-            return;
-        }
-        pend = aoa_in;
-        pend_len = aoa_in_len;
-        pend_at = 0;
-        usb_bytes += pend_len;
-        /* The next transfer, into the other buffer, while this one is
-         * taken apart. */
-        if (aoa_read(daddr)) {
-            fail("reading from the phone failed", 0);
-            return;
-        }
-    }
-    while (state != FAILED) {
-        if (aastream_room(&stream) < FRAME_ROOM) {
-            if (!paused) {
-                paused = 1;
-                stream.paused++;
-            }
-            return;
-        }
-        paused = 0;
-        if (aap_next(&reader, &f)) {
-            one_frame(&f);
-            continue;
-        }
-        if (pend_at >= pend_len) {
-            pend = NULL;
-            return;
-        }
-        {
-            uint32_t k = pend_len - pend_at < AAP_FEED_MAX ? pend_len - pend_at : AAP_FEED_MAX;
-            if (aap_feed(&reader, pend + pend_at, k)) {
-                fail("the phone's bytes make no frames", 0);
-                return;
-            }
-            pend_at += k;
-        }
-    }
-}
-
-/* Acknowledgements for what the 192 has read, and a key frame when it
- * asked for one. */
-static void for_the_192(void)
-{
-    static const uint32_t key_codes[AALINK_KEYS] = AALINK_KEY_CODES;
-    uint16_t code;
-    /* The 192's keys and knob (aalink.h, "Input"), to the phone; with
-     * no session, dropped. */
-    while (aastream_input_take(&stream, &code)) {
-        uint64_t us = time_us_64();
-        if (AALINK_IN_KIND(code) == AALINK_IN_BACKLOG) {
-            backlog = code & 0xff;
-            continue;
-        }
-        if (state < AUTHED || state == FAILED)
-            continue;
-        if (AALINK_IN_KIND(code) == AALINK_IN_KNOB) {
-            aa_hu_rotary(&hu, us, (int8_t)(code & 0xff));
-        } else if (AALINK_IN_KIND(code) == 0 && ((code & 0xff) >> 1) < AALINK_KEYS) {
-            aa_hu_key(&hu, us, key_codes[(code & 0xff) >> 1], code & 1);
-        }
-        flush();
-    }
-    if (state < AUTHED || state == FAILED)
+    if (feed.ses.state == AA_S_FAILED || !aa_feed_idle(&feed) || !aoa_in_done)
         return;
-    /* A picture is acknowledged once its last block has gone to the 192,
-     * at once while the 192 is less than two pictures behind with its
-     * decoding, else when it catches up or ACK_HOLD_MS later, whichever
-     * comes first.  The phone waits for the acknowledgement up to some
-     * 300 ms and then drops a frame of its own ("Waiting for ack
-     * timeout, video frame dropped" in a Pixel's log, 2026-11-18): held
-     * within that, it sends no faster than the 192 decodes, 4 a second
-     * at the least. */
-    {
-        uint32_t now = ms();
-        if (ack_out != ack_in && (int32_t)(stream.sent - (ackq[ack_out % ACKQ] + 1)) >= 0 && !ack_since)
-            ack_since = now | 1;
+    if (aoa_in_done < 0) {
+        fail("reading from the phone failed");
+        return;
     }
-    while (ack_out != ack_in && (int32_t)(stream.sent - (ackq[ack_out % ACKQ] + 1)) >= 0 &&
-           (backlog < 2 || ms() - ack_since >= ACK_HOLD_MS)) {
-        ack_since = 0;
-        aa_hu_video_ack(&hu);
-        ack_out++;
-        /* Each sent at once: the session's queue holds only a few. */
-        flush();
-        if (ack_out != ack_in && (int32_t)(stream.sent - (ackq[ack_out % ACKQ] + 1)) >= 0)
-            ack_since = ms() | 1;
-    }
-    if (stream.key_asked != key_asked_seen) {
-        key_asked_seen = stream.key_asked;
-        aa_hu_ask_key_frame(&hu);
-    }
-    flush();
+    usb_bytes += aoa_in_len;
+    aa_feed_give(&feed, aoa_in, aoa_in_len);
+    if (aoa_read(daddr))
+        fail("reading from the phone failed");
 }
 
 static const char *const state_names[] = { "idle", "ready", "ident", "stby", "tran", "data" };
@@ -708,41 +406,26 @@ static void log_card(void)
             log_lost ? " (log lost some)" : "",
             (unsigned long)((stream.messages - last_messages) * 1000 / dt),
             (unsigned long)((usb_bytes - last_usb) * 1000 / 1024 / dt),
-            (unsigned long)((decrypt_us - last_decrypt) / 10 / dt),
+            (unsigned long)((feed.ses.decrypt_us - last_decrypt) / 10 / dt),
             (unsigned long)(stream.head - stream.tail), (unsigned)LINK_BLOCKS, (unsigned long)stream.head,
-            (unsigned long)hu.v.acks, (unsigned long)stream.paused, (unsigned long)stream.key_asked,
-            (unsigned long)stream.inputs, (unsigned long)((hu.audio_bytes - last_audio) * 1000 / 1024 / dt),
-            (unsigned long)sound_dropped, (unsigned long)backlog, dropped_bytes ? " (bytes dropped!)" : "");
+            (unsigned long)feed.ses.hu.v.acks, (unsigned long)feed.pauses, (unsigned long)stream.key_asked,
+            (unsigned long)stream.inputs, (unsigned long)((feed.ses.hu.audio_bytes - last_audio) * 1000 / 1024 / dt),
+            (unsigned long)feed.sound_dropped, (unsigned long)feed.backlog, feed.dropped_bytes ? " (bytes dropped!)" : "");
         last_blocks = b;
         last_reads = reads;
         last_messages = stream.messages;
         last_usb = usb_bytes;
-        last_decrypt = decrypt_us;
-        last_audio = hu.audio_bytes;
+        last_decrypt = feed.ses.decrypt_us;
+        last_audio = feed.ses.hu.audio_bytes;
         t_stats = now;
-        if (state == STREAMING)
+        if (feed.ses.state == AA_S_AUTHED && feed.streaming)
             status_set(moved ? ST_OK : ST_WORKING);
     }
 }
 
 static void phone_gone(void)
 {
-    if (state >= HANDSHAKE)
-        aa_tls_free(&tls);
-    if (video_open) {
-        (void)aastream_end(&stream, 0);
-        video_open = 0;
-    }
-    {
-        int ch;
-        for (ch = 1; ch < AASTREAM_CHANNELS; ch++)
-            if (stream.ch[ch].in_message)
-                (void)aastream_end(&stream, ch);
-    }
-    stream.state &= (uint16_t)~(AALINK_PHONE | AALINK_VIDEO);
-    pend = NULL;
-    paused = 0;
-    ack_in = ack_out = 0;
+    aa_feed_close(&feed);
     state = WAITING;
     status_set(ST_WAIT);
     printf("the phone is gone\n");
@@ -773,29 +456,21 @@ static void core1(void)
             tuh_vid_pid_get(daddr, &vid, &pid);
             printf("device %u: %04x:%04x\n", daddr, vid, pid);
             if (aoa_is_accessory(vid, pid)) {
-                uint8_t m[16];
-                int n = aap_version_request(m);
-                aap_reader_init(&reader);
-                aap_assembler_init(&msg);
-                pend = NULL;
-                usb_bytes = decrypt_us = 0;
-                if (aoa_open(daddr) || aoa_send(daddr, m, (uint32_t)n) || aoa_read(daddr)) {
-                    fail("the accessory's endpoints did not work", 0);
-                } else {
-                    state = VERSION;
-                    status_set(ST_BUSY);
-                }
+                usb_bytes = 0;
+                state = RUNNING;
+                if (aoa_open(daddr) || aa_feed_open(&feed) || aoa_read(daddr))
+                    fail("the accessory's endpoints did not work");
             } else {
                 status_set(ST_BUSY);
                 if (aoa_switch(daddr))
-                    fail("no accessory mode", 0);
+                    fail("no accessory mode");
                 else
                     state = SWITCHING;
             }
         }
-        if (state >= VERSION && state != FAILED)
+        if (state == RUNNING)
             phone_bytes();
-        for_the_192();
+        aa_feed_run(&feed);
         log_card();
     }
 }
@@ -860,6 +535,15 @@ int main(void)
     stdio_init_all();
     lock = spin_lock_init((uint)spin_lock_claim_unused(true));
     aastream_init(&stream, ring, LINK_BLOCKS);
+    {
+        struct aa_session_cert cert = { hu_cert_pem, sizeof hu_cert_pem, HU_CERT_WIRE ? hu_cert_wire : NULL,
+                                                     HU_CERT_WIRE ? sizeof hu_cert_wire : 0, hu_key_pem, sizeof hu_key_pem };
+        struct aa_sink sink;
+        aa_streamsink_init(&streamsink, &stream, reading, NULL);
+        aa_streamsink_sink(&streamsink, &sink);
+        feed.event = on_event;
+        aa_feed_init(&feed, link_send, link_us, NULL, &cert, AA_MAX_UNACKED, &sink);
+    }
     link_sector = volume_link_sector();
     volume_link = link_sector_words;
     card_reset(&card);
