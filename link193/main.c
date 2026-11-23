@@ -1,0 +1,136 @@
+/* The 193's check of the bridge as a card: LINKTEST.BIN on the bridge's
+ * card is 8 MB in which word j (big endian) is pattern(j)
+ * (src/volume.c), so each sector is checked as it arrives.  One sector
+ * a command (CMD17), then CMD18 with 8, 64 and 256 blocks a command, at
+ * the stock software's clock (divider 0) and at half of it (1).  As the
+ * kit's examples/speed193, but a program of the SD loader's: the keys
+ * are answered all the while (the display key, CD EJECT, RETURN held
+ * for two seconds goes back to the loader), nothing is written, and at
+ * the end it returns to the loader.
+ *
+ * Records on 0x7F8 (test, item, value, second):
+ *   0xb0 0     alive; 0xb0 2 sd_init (value); 0xb0 3 sd_open (value),
+ *              second = the file's first sector
+ *   0xb1 n     test n: value = KB/s, second = sectors read
+ *   0xb2 n     test n: value = bad sectors, second = the first bad one
+ *              (0xffff: none); 0xb3 n the first read's result, when one
+ *              failed (value), and the sector it was for (second)
+ *   0xb4 n     test n: value = microseconds
+ *   0xff 0xff  the end
+ *
+ * The 193 only. */
+#include "rnse.h"
+
+#define BUFFER ((u8 *)0x8c000000)
+
+static void say(u8 test, u8 item, u32 value, u32 second)
+{
+    u8 d[8] = { test, item, (u8)(value >> 24), (u8)(value >> 16), (u8)(value >> 8), (u8)value, (u8)(second >> 8), (u8)second };
+    can_tell(0x7f8, d, 8, panel_service);
+}
+
+static u32 pattern(u32 j)
+{
+    u32 x = (j + 1) * 0x9e3779b1u;
+    x ^= x >> 16;
+    x *= 0x85ebca6bu;
+    x ^= x >> 13;
+    return x;
+}
+
+/* Sector s of the file in p: every word as it should be? */
+static int sector_ok(const u8 *p, u32 s)
+{
+    u32 i;
+    for (i = 0; i < 128; i++) {
+        u32 w = (u32)p[4 * i] << 24 | (u32)p[4 * i + 1] << 16 | (u32)p[4 * i + 2] << 8 | p[4 * i + 3];
+        if (w != pattern(s * 128 + i))
+            return 0;
+    }
+    return 1;
+}
+
+static u32 first_sector;
+
+/* Test n: total sectors in commands of `per` blocks (per 1: CMD17). */
+static void run(u8 n, u32 total, u32 per)
+{
+    u32 t, done = 0, bad = 0, first_bad = 0xffff, s;
+    int r, reported = 0;
+    t = micros();
+    while (done < total) {
+        u32 count = per < total - done ? per : total - done;
+        u32 room = 0x20000 / 512;
+        if (count > room)
+            count = room;
+        if (per == 1)
+            r = sdhi_read(first_sector + done, BUFFER);
+        else
+            r = sdhi_read_multi(first_sector + done, count, BUFFER);
+        if (r && !reported) {
+            say(0xb3, n, (u32)r, done);
+            reported = 1;
+        }
+        for (s = 0; s < count; s++)
+            if (r || !sector_ok(BUFFER + 512 * s, done + s)) {
+                if (!bad)
+                    first_bad = done + s;
+                bad++;
+            }
+        done += count;
+        panel_service();
+    }
+    t = micros() - t;
+    say(0xb1, n, t ? udiv(total * 512 * 1000u, t) * 1000u / 1024u : 0, total);
+    say(0xb2, n, bad, first_bad);
+    say(0xb4, n, t, 0);
+}
+
+int main(void)
+{
+    static u32 chain[4096];
+    struct sd_file f;
+    int r;
+
+    board_init();
+    panel_init();
+    /* The faceplate's start answered before any card is touched, as the
+     * viewer does on the 193 (aaviewer/main.c). */
+    {
+        u32 t = millis();
+        while (millis() - t < 600) {
+            panel_service();
+            cpu_idle();
+        }
+    }
+    sd_idle = panel_service;
+    display_idle = panel_service;
+    can_attach();
+    say(0xb0, 0, millis(), 0);
+    screen_palette(1, 255, 255, 255);
+    screen_text(16, 16, "LINK 193: READING THE BRIDGE", 1, 2);
+    screen_text(16, 48, "HOLD RETURN 2 S: BACK TO THE LOADER", 1, 2);
+
+    sdhi_fast_clock = 0;
+    r = sd_init(0);
+    say(0xb0, 2, (u32)r, 0);
+    if (r == 0) {
+        r = sd_open("LINKTESTBIN", &f, chain, 4096);
+        first_sector = f.data_start + (chain[0] - 2) * f.per_cluster;
+        say(0xb0, 3, (u32)r, first_sector);
+        if (r == 0) {
+            run(1, 256, 1);
+            run(2, 1024, 8);
+            run(3, 2048, 64);
+            run(4, 4096, 256);
+            sdhi_fast_clock = 1;
+            if (sd_init(0) == 0) {
+                run(5, 256, 1);
+                run(6, 4096, 256);
+            }
+        }
+    }
+    say(0xff, 0xff, millis(), 0);
+    screen_text(16, 80, "DONE", 1, 2);
+    return 0;
+}

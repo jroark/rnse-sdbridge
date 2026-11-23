@@ -81,7 +81,7 @@ static struct card card;
 static uint8_t raw[RAW];
 static volatile int raw_full;
 static volatile uint32_t stage[3];
-static volatile uint32_t stat_build, stat_blocks, stat_start, stat_begun, stat_lost, stat_scan;
+static volatile uint32_t stat_over, stat_reads, stat_build, stat_blocks, stat_start, stat_begun, stat_lost, stat_scan;
 
 
 static void capture_init(void)
@@ -267,7 +267,7 @@ static inline void IRAM_ATTR respond(const struct reply *rp)
  * the sector, its CRC16, and 0xff five times (the end bit, and 1s until
  * the loop has let the line go). */
 #define DAT_SPI SPI_LL_GET_HW(SPI2_HOST)
-#define BLOCK_BYTES 520
+#define BLOCK_BYTES 532
 #define BLOCK_CLOCKS (8 * 516)
 static uint8_t *block[2];
 static dma_descriptor_t *block_desc;
@@ -285,8 +285,8 @@ static void data_init(void)
     spi_dev_t *hw = DAT_SPI;
     gdma_channel_alloc_config_t alloc = { .direction = GDMA_CHANNEL_DIRECTION_TX };
     gdma_strategy_config_t strategy = { .auto_update_desc = false, .owner_check = false };
-    block[0] = heap_caps_aligned_alloc(4, BLOCK_BYTES, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    block[1] = heap_caps_aligned_alloc(4, BLOCK_BYTES, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    block[0] = heap_caps_aligned_alloc(4, BLOCK_BYTES + 4, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    block[1] = heap_caps_aligned_alloc(4, BLOCK_BYTES + 4, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     block_desc = heap_caps_aligned_alloc(4, sizeof *block_desc, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     PERIPH_RCC_ATOMIC() {
         spi_ll_enable_bus_clock(SPI2_HOST, true);
@@ -342,7 +342,7 @@ static void IRAM_ATTR build(uint8_t *b, uint32_t n)
         w[i] = __builtin_bswap32(sector_words[i]);
     b[516] = (uint8_t)(crc >> 8);
     b[517] = (uint8_t)crc;
-    memset(b + 518, 0xff, 6);
+    memset(b + 518, 0xff, BLOCK_BYTES + 3 - 518);
 }
 
 static inline void IRAM_ATTR data_stop(void)
@@ -499,7 +499,8 @@ static void IRAM_ATTR card_loop(void *arg)
                     }
                     if (clocks - d_from > 4113 + 12) {
                         data_stop();
-                        record('e', f, esp_cpu_get_cycle_count() - t_data);
+                        if (clocks - d_from - (4113 + 12) > stat_over)
+                            stat_over = clocks - d_from - (4113 + 12);
                         stat_blocks = stat_blocks + 1;
                         if (reading == 2 && next_built && sector + 1 < VOLUME_SECTORS) {
                             sector++;
@@ -528,7 +529,6 @@ static void IRAM_ATTR card_loop(void *arg)
             if (hunting && !(b & 2)) {
                 /* The block's start bit: it ends 4113 clocks on. */
                 d_from = clocks;
-                record('h', f, esp_cpu_get_cycle_count() - t_data);
                 hunting = 0;
                 pass_mask = 0x81818181u;
                 pass_value = 0x01010101u;
@@ -543,7 +543,6 @@ static void IRAM_ATTR card_loop(void *arg)
             if (state == LISTEN) {
                 state = COMMAND;
             } else {
-                record('s', f, esp_cpu_get_cycle_count() - t_sel);
                 state = RESPONSE;
             }
             continue;
@@ -582,7 +581,12 @@ static void IRAM_ATTR card_loop(void *arg)
             if (rp.nwords) {
                 respond(&rp);
                 t_sel = esp_cpu_get_cycle_count();
-                record('c', f, t_sel - t_end);
+                if (rp.index == 17 || rp.index == 18 || rp.index == 12 || rp.index == 13) {
+                    if (rp.index != 17 || stat_reads % 1000 < 12)
+                        record('c', f, t_sel - t_end);
+                    stat_reads = stat_reads + 1;
+                } else
+                    record('c', f, t_sel - t_end);
                 if (t_sel - t_end > stat_slowest)
                     stat_slowest = t_sel - t_end;
                 left = (int)rp.words[0] + 1;
@@ -609,8 +613,6 @@ static void IRAM_ATTR card_loop(void *arg)
         }
         cmd_select(0);
         response_arm();
-        gather(start, f);
-        record('r', f, 0);
         taken(start, (uint32_t)left);
         r = (start + (uint32_t)left) & MASK;
         clocks += (uint32_t)left;
@@ -646,6 +648,17 @@ void app_main(void)
     gpio_set_pull_mode(PIN_CLK, GPIO_FLOATING);
     gpio_set_pull_mode(PIN_DAT0, GPIO_FLOATING);
     card_reset(&card);
+    {
+        /* LINKBENC.BIN for the volume, when the build was given one. */
+        extern const uint8_t program_start[] asm("_binary_card_program_bin_start");
+        extern const uint8_t program_end[] asm("_binary_card_program_bin_end");
+        uint32_t n = (uint32_t)(program_end - program_start);
+        if (n > 16 && n <= VOLUME_PROGRAM_ROOM) {
+            memcpy(volume_program, program_start, n);
+            volume_program_bytes = n;
+            printf("LINKBENC.BIN on the card: %lu bytes\n", (unsigned long)n);
+        }
+    }
     capture_init();
     response_init();
     data_init();
@@ -659,7 +672,7 @@ void app_main(void)
             rec_tail = rec_head - RECS;
         while (rec_tail != rec_head) {
             const struct rec *q = &recs[rec_tail++ % RECS];
-            if (lines++ >= 45)
+            if (lines++ >= 240)
                 continue;
             if (q->kind == 'c') {
                 int ok = crc7(q->f, 5) == q->f[5] >> 1;
@@ -736,9 +749,14 @@ void app_main(void)
             printf("the line from a damaged command's start (1 CMD, 2 DAT0): %s\n", line);
             raw_full = 0;
         }
-        printf("idle scan %lu cycles for 4000 clocks  begun %lu lost %lu  ", (unsigned long)stat_scan, (unsigned long)stat_begun, (unsigned long)stat_lost);
-        printf("blocks %lu (one made in %lu cycles, started in %lu)  stages: bits %lu, answer %lu cycles  ", (unsigned long)stat_blocks,
-            (unsigned long)stat_build, (unsigned long)stat_start, (unsigned long)stage[0], (unsigned long)stage[1]);
+        printf("reads %lu  lost %lu  latest stop %lu clocks  ", (unsigned long)stat_reads, (unsigned long)stat_lost, (unsigned long)stat_over);
+        {
+            static uint32_t blocks_before;
+            uint32_t nb = stat_blocks;
+            printf("blocks %lu (%lu KB/s; one made in %lu cycles)  ", (unsigned long)nb, (unsigned long)((nb - blocks_before) / 2),
+                (unsigned long)stat_build);
+            blocks_before = nb;
+        }
         {
             static uint32_t before;
             uint32_t now = stat_clocks;
