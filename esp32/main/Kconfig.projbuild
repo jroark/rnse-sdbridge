@@ -12,6 +12,18 @@ menu "Android Auto bridge"
         string "Its password"
         default ""
 
+    config AA_AP_SSID
+        string "Wi-Fi network to make, when none is joined (empty: none)"
+        default "rnse-aa"
+        help
+            The bridge is the access point and the phone joins it, as a
+            phone joins a wireless head unit.  The bridge then tries the
+            head unit server of each device that has joined.
+
+    config AA_AP_PASSWORD
+        string "Its password (8 characters at least; change the test default)"
+        default "rnsetest1234"
+
     config AA_PHONE_HOST
         string "The phone's address (empty: the network's gateway)"
         default ""
