@@ -804,6 +804,20 @@ static u32 sound_room(void)
         return 0x7fffffff; /* (sound_put drops what does not fit) */
     }
     sound_stalled = 0;
+    /* The 193: sound that has fallen far behind is passed over, in one
+     * cut.  A bridge with a big ring (the ESP32-S3's half megabyte) keeps
+     * what the phone sent while big pictures were decoded and gives it
+     * all at once; waiting here for room then held the pictures behind
+     * more than a second of old sound, for minutes (the playing catches
+     * up by half a per cent at most): a unit, 2026-11-23. */
+    if (ON_193) {
+        struct source *f = &sources[0];
+        u32 fill = f->in - f->out;
+        if (fill > f->target + 19200) {     /* 0.4 s more than it keeps ahead */
+            f->dropped += fill - f->target;
+            f->out = f->in - f->target;
+        }
+    }
     return sources[0].frames - 1 - (sources[0].in - sources[0].out);
 }
 

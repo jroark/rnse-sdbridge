@@ -44,7 +44,7 @@ static unsigned tcp_departures;
 /* ---- the stream, between the session (this core) and the card ------- */
 
 #ifndef LINK_BLOCKS
-#define LINK_BLOCKS 128
+#define LINK_BLOCKS 1024
 #endif
 static struct aastream stream;
 static struct aa_streamsink streamsink;
@@ -165,10 +165,18 @@ static void phone_task(void *arg)
         vTaskDelete(NULL);
     }
     {
-        /* The stream's ring in the chip's own RAM, where the card's
-         * loop reads it without the cache. */
-        static uint8_t ring[LINK_BLOCKS][512] __attribute__((aligned(4)));
+        /* The stream's ring in the PSRAM: half a megabyte, so that a big
+         * picture (the first of a screen is 50 KB and more) leaves room
+         * for the sound.  With the RP2040's 63 KB the sound was dropped
+         * and the phone held back whenever one came (a 193, 2026-11-23:
+         * at the start and when Maps opened).  The card's loop reads it
+         * through the cache, which costs a block some microseconds. */
+        void *ring = heap_caps_aligned_alloc(4, LINK_BLOCKS * 512, MALLOC_CAP_SPIRAM);
         struct aa_sink sink;
+        if (!ring) {
+            printf("no memory for the stream: is the PSRAM there?\n");
+            vTaskDelete(NULL);
+        }
         aastream_init(&stream, ring, LINK_BLOCKS);
         aa_streamsink_init(&streamsink, &stream, reading, NULL);
         aa_streamsink_sink(&streamsink, &sink);
