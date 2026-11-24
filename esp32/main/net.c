@@ -174,6 +174,9 @@ int net_start(void)
     else
         ap = esp_netif_create_default_wifi_ap();
     ESP_ERROR_CHECK(esp_wifi_init(&init));
+    /* Nothing of Wi-Fi's kept in the flash: a write there needs the
+     * second core, which is the card's alone (main/sdcard.c). */
+    esp_wifi_set_storage(WIFI_STORAGE_RAM);
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_wifi, NULL);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_wifi, NULL);
     memset(&c, 0, sizeof c);

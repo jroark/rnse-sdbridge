@@ -79,6 +79,12 @@ static uint32_t rec_tail;
 static volatile uint32_t stat_clocks, stat_commands, stat_slowest, stat_reads, stat_blocks, stat_lost, stat_build;
 static struct card card;
 static struct sdcard_hooks hooks;
+/* The line as the ring had it from a damaged command's start bit, and
+ * where the loop was: kept until sdcard_report has printed it. */
+#define RAW 128
+static uint8_t raw[RAW];
+static volatile int raw_full;
+static uint32_t raw_at, raw_since, raw_data;
 
 static void capture_init(void)
 {
@@ -430,11 +436,25 @@ static void IRAM_ATTR card_loop(void *arg)
      * passed over only if DAT0 is high in it too. */
     uint32_t pass_mask = 0x81818181u, pass_value = 0x01010101u;
     int hunting = 0;
+    /* For the damaged command's note: what ended last (1 a command, 2 a
+     * response) and at which clock. */
+    uint32_t last_end = 0;
+    int last_kind = 0;
     uint8_t f[6];
     struct reply rp;
     (void)arg;
     memset(f, 0, sizeof f);
     response_arm();
+    /* Nothing interrupts this core from here on.  The system's tick did,
+     * every millisecond, for some microseconds: when that fell on a
+     * response, the line was let go late, SPI3 ran out of its buffer's
+     * 1s 142 clocks after the end bit and drove CMD low for 60 clocks,
+     * which the loop then took for a damaged command and said so in its
+     * next response (a 193, 2026-11-23: one command in 1500, each a read
+     * the viewer had to give up).  The first core keeps the system's
+     * time; what would need this core's help (a write to the flash)
+     * must not happen while the card runs. */
+    portDISABLE_INTERRUPTS();
     for (;;) {
         if (state == LISTEN || state == AWAIT) {
             uint8_t b;
@@ -528,6 +548,18 @@ static void IRAM_ATTR card_loop(void *arg)
             t_end = esp_cpu_get_cycle_count();
             gather(start, f);
             card_command(&card, f, &rp);
+            if (!raw_full && ((f[0] & 0xc0) != 0x40 || crc7(f, 5) != f[5] >> 1)) {
+                int i;
+                esp_rom_delay_us(4);
+                for (i = 0; i < RAW; i++)
+                    raw[i] = ring[(start + (uint32_t)i) & MASK];
+                raw_at = start;
+                raw_since = clocks - last_end;
+                raw_data = (uint32_t)d_state << 8 | (uint32_t)hunting << 4 | (uint32_t)last_kind;
+                raw_full = 1;
+            }
+            last_kind = 1;
+            last_end = clocks + 48;
             if (rp.read) {
                 /* A read, or a stop: whatever was going out ends here. */
                 data_stop();
@@ -579,6 +611,8 @@ static void IRAM_ATTR card_loop(void *arg)
         taken(start, (uint32_t)left);
         r = (start + (uint32_t)left) & MASK;
         clocks += (uint32_t)left;
+        last_kind = 2;
+        last_end = clocks;
         state = LISTEN;
         if (d_state == 1) {
             /* The block asked for: made now, when the host waits for it
@@ -614,8 +648,7 @@ void sdcard_start(const struct sdcard_hooks *h)
     capture_init();
     response_init();
     data_init();
-    /* The second core's, and nothing else's: as high as its ipc task,
-     * which the system needs there now and then (a write to the flash). */
+    /* The second core's, and nothing else's. */
     xTaskCreatePinnedToCore(card_loop, "card", 4096, NULL, configMAX_PRIORITIES - 1, NULL, 1);
 }
 
@@ -637,6 +670,18 @@ void sdcard_report(int commands)
             printf("  answered after %lu cycles\n", (unsigned long)q->cycles);
         else
             printf("  no answer\n");
+    }
+    if (raw_full) {
+        char line[RAW + 1];
+        int i;
+        for (i = 0; i < RAW; i++)
+            line[i] = raw[i] == 0xff ? '.' : (char)('0' + (raw[i] & 3));
+        line[RAW] = 0;
+        printf("a damaged command: at %lu of the ring (%lu in its 1024, %lu in its 8), %lu clocks after the last %s, "
+               "data %lu, looking for a block %lu; the line from it (1 CMD, 2 DAT0):\n  %s\n",
+            (unsigned long)raw_at, (unsigned long)(raw_at % 1024), (unsigned long)(raw_at % 8), (unsigned long)raw_since,
+            (raw_data & 15) == 2 ? "response" : "command", (unsigned long)(raw_data >> 8), (unsigned long)(raw_data >> 4 & 1), line);
+        raw_full = 0;
     }
     printf("card: %s  clock %lu kHz  commands %lu  reads %lu  blocks %lu (%lu KB/s)  bad CRC %lu  refused %lu  lost %lu  "
            "slowest answer %lu cycles  a block made in %lu\n",

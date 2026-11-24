@@ -25,7 +25,9 @@ struct sdcard_hooks {
 };
 
 /* The pins, the peripherals and the loop on core 1.  Call it last:
- * after it nothing else runs on that core. */
+ * after it nothing else runs on that core, and it takes no interrupt,
+ * so nothing may write to the flash from then on (Wi-Fi keeps its
+ * settings in RAM: main/net.c). */
 void sdcard_start(const struct sdcard_hooks *hooks);
 /* A line of the log with what the card did since the last, after the
  * commands that were not reads when `commands` is set. */
