@@ -15,6 +15,7 @@
 static esp_netif_t *sta, *ap;
 static volatile int have_ip, wanted;
 static volatile int ready_fd = -1;
+static volatile unsigned departures;
 
 static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -28,6 +29,7 @@ static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data)
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STACONNECTED) {
         printf("Wi-Fi: a device joined\n");
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STADISCONNECTED) {
+        departures = departures + 1;
         printf("Wi-Fi: a device left\n");
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         const ip_event_got_ip_t *e = data;
@@ -50,13 +52,35 @@ static int try_address(uint32_t addr)
         return -1;
     /* (The timeout bounds the sends to a phone that has gone, too.) */
     setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
-    if (connect(s, (struct sockaddr *)&a, sizeof a)) {
-        /* Said now and then: the head unit server may just not be started. */
-        static unsigned tries;
-        if (tries++ % 5 == 0)
-            printf("no head unit server at %s port %d (%s)\n", inet_ntoa(a.sin_addr), CONFIG_AA_PHONE_PORT, strerror(errno));
-        close(s);
-        return -1;
+    {
+        /* Two seconds for the connection: an address nobody has would
+         * hold the task for much longer. */
+        int flags = fcntl(s, F_GETFL, 0), r, err = 0;
+        socklen_t len = sizeof err;
+        fd_set w;
+        struct timeval wait = { 2, 0 };
+        fcntl(s, F_SETFL, flags | O_NONBLOCK);
+        r = connect(s, (struct sockaddr *)&a, sizeof a);
+        if (r && errno == EINPROGRESS) {
+            FD_ZERO(&w);
+            FD_SET(s, &w);
+            r = select(s + 1, NULL, &w, NULL, &wait) == 1 ? 0 : -1;
+            if (r)
+                err = ETIMEDOUT;
+            else if (getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &len) || err)
+                r = -1;
+        } else if (r) {
+            err = errno;
+        }
+        fcntl(s, F_SETFL, flags);
+        if (r) {
+            /* Said now and then: the head unit server may just not be started. */
+            static unsigned tries;
+            if (tries++ % 5 == 0)
+                printf("no head unit server at %s port %d (%s)\n", inet_ntoa(a.sin_addr), CONFIG_AA_PHONE_PORT, strerror(err));
+            close(s);
+            return -1;
+        }
     }
     setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
     printf("connected to the phone's head unit server at %s port %d\n", inet_ntoa(a.sin_addr), CONFIG_AA_PHONE_PORT);
@@ -89,6 +113,20 @@ static int try_phone(void)
         for (i = 0; i < list.num; i++)
             if (pair[i].ip.addr && (s = try_address(pair[i].ip.addr)) >= 0)
                 return s;
+        /* A phone that was here before this chip restarted may keep the
+         * address it had without asking again, and is then in nobody's
+         * table: the pool's first addresses, as they were given out. */
+        for (i = 0; i < list.num; i++)
+            if (!pair[i].ip.addr) {
+                esp_netif_ip_info_t ip;
+                uint32_t k;
+                if (esp_netif_get_ip_info(ap, &ip) != ESP_OK)
+                    return -1;
+                for (k = 2; k <= 4; k++)
+                    if ((s = try_address((ip.ip.addr & ip.netmask.addr) | htonl(k))) >= 0)
+                        return s;
+                break;
+            }
         return -1;
     }
     {
@@ -109,6 +147,11 @@ static void net_task(void *arg)
         }
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
+}
+
+unsigned net_departures(void)
+{
+    return departures;
 }
 
 int net_start(void)

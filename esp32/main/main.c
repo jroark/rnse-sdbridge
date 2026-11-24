@@ -38,6 +38,8 @@ static uint8_t *tcp_buf;
 #define TCP_BUF 16384
 
 static uint64_t link_bytes;
+static uint64_t tcp_heard;       /* when the phone last sent anything over TCP */
+static unsigned tcp_departures;
 
 /* ---- the stream, between the session (this core) and the card ------- */
 
@@ -218,6 +220,8 @@ static void phone_task(void *arg)
             fcntl(tcp, F_SETFL, flags | O_NONBLOCK);
             via = LINK_TCP;
             link_bytes = 0;
+            tcp_heard = link_us(NULL);
+            tcp_departures = net_departures();
             if (aa_feed_open(feed))
                 link_down("the connection did not work");
         } else if (wifi && via != LINK_NONE) {
@@ -230,12 +234,22 @@ static void phone_task(void *arg)
         } else if (via == LINK_TCP && aa_feed_idle(feed)) {
             int n = recv(tcp, tcp_buf, TCP_BUF, 0);
             if (n > 0) {
+                tcp_heard = link_us(NULL);
                 link_bytes += (uint32_t)n;
                 aa_feed_give(feed, tcp_buf, (uint32_t)n);
             } else if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
                 link_down("the phone closed the connection");
             }
         }
+
+        /* A phone that left the network, or went out of reach, closes
+         * nothing: its connection is given up when a device has left or
+         * nothing has come for six seconds (the phone sends a ping every
+         * second or so), and the next is tried. */
+        if (via == LINK_TCP && net_departures() != tcp_departures)
+            link_down("a device left the network: the connection is given up");
+        else if (via == LINK_TCP && link_us(NULL) - tcp_heard > 6000000)
+            link_down("nothing from the phone for 6 s: the connection is given up");
 
         if (via != LINK_NONE)
             aa_feed_run(feed);

@@ -15,4 +15,8 @@ void net_want(int want);
 /* A connection made: its socket (the caller's from then on), or -1. */
 int net_take(void);
 
+/* How many times a device has left the network (ours, as the access
+ * point): a connection to it does not say so by itself. */
+unsigned net_departures(void);
+
 #endif
