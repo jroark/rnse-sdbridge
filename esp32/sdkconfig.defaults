@@ -30,3 +30,5 @@ CONFIG_GDMA_CTRL_FUNC_IN_IRAM=y
 # TLS's buffers go to the PSRAM where they can.
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+# The card's loop takes no interrupt on the second core.
+CONFIG_ESP_INT_WDT_CHECK_CPU1=n
