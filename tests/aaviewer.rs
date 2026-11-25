@@ -328,6 +328,75 @@ fn viewer_follows_the_steering_wheel_on_the_193() {
     assert!(wheel.last().is_some_and(|&n| n > 0), "{:?}", wheel);
 }
 
+/// A viewer started from its own disc in a car must not keep the unit
+/// awake with the key out: once the ignition has been seen on, ten
+/// seconds of the key out end it with a record (0xda) and a restart, into
+/// the stock software.  A key that comes back within that time changes
+/// nothing, and neither does a bus that never showed an ignition (a unit
+/// alone on a bench).
+#[test]
+fn viewer_hands_back_to_stock_at_key_off_on_the_193() {
+    use rnse::dev::hcan::Frame;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let Some(program) = build_193() else { return };
+    let Some(card) = card_with_sound(&root.join("tests/data/margin.264"), 3000) else { return };
+    let gone = |m: &mut Machine| m.can().tx.iter().any(|f| f.id == 0x7f8 && f.data[0] == 0xda);
+
+    // No ignition message at all: it runs on.
+    let mut m = start_193(&program, card.clone());
+    m.can().start();
+    let ms = m.cycles_per_ms();
+    for _ in 0..250 {
+        assert_eq!(m.run(100 * ms), Stop::Budget, "{:?}: {}", m.cpu.fault, console(&m));
+    }
+    assert!(!gone(&mut m), "{}", console(&m));
+    assert_eq!(m.resets, 0);
+
+    let mut m = start_193(&program, card);
+    m.can().start();
+    m.can_send_cyclic(Frame::new(0x271, &[0x03]), 100);
+    for _ in 0..200 {
+        if console(&m).contains("aaviewer: frame 11 ") {
+            break;
+        }
+        assert_eq!(m.run(100 * ms), Stop::Budget, "{:?}: {}", m.cpu.fault, console(&m));
+    }
+    // Out for five seconds and in again: nothing.
+    m.can_send_cyclic(Frame::new(0x271, &[0x00]), 100);
+    for _ in 0..50 {
+        assert_eq!(m.run(100 * ms), Stop::Budget, "{:?}: {}", m.cpu.fault, console(&m));
+    }
+    m.can_send_cyclic(Frame::new(0x271, &[0x03]), 100);
+    for _ in 0..120 {
+        assert_eq!(m.run(100 * ms), Stop::Budget, "{:?}: {}", m.cpu.fault, console(&m));
+    }
+    assert!(!gone(&mut m), "{}", console(&m));
+    // Out for good: the record within ten to eleven seconds, then the restart.
+    m.can_send_cyclic(Frame::new(0x271, &[0x00]), 100);
+    let mut after = None;
+    let mut restarted = false;
+    for k in 0..130 {
+        restarted |= m.run(100 * ms) != Stop::Budget;
+        if gone(&mut m) {
+            after = Some(k);
+            break;
+        }
+    }
+    let after = after.unwrap_or_else(|| panic!("no hand-back: {}", console(&m)));
+    assert!((95..=115).contains(&after), "after {} tenths of a second", after);
+    let d = m.can().tx.iter().find(|f| f.id == 0x7f8 && f.data[0] == 0xda).unwrap().data;
+    assert_eq!(&d[..8], &[0xda, 0, 0, 0, 0, 10, 0, 0]);
+    // (The emulator stops at the jump to the reset entry: the boot
+    // ROM's, which is not part of it.)
+    for _ in 0..20 {
+        if restarted || m.resets > 0 {
+            break;
+        }
+        restarted |= m.run(100 * ms) != Stop::Budget;
+    }
+    assert!(restarted || m.resets > 0, "still in the viewer: pc {:08x}", m.cpu.pc);
+}
+
 /// The phone's sound on the 193: the same 1 kHz tone (the left at half
 /// the right's level) through the chip's own sound interface (the kit's
 /// pcm_stream there), the amplifier on the decoder's input at the volume

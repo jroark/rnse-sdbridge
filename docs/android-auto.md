@@ -349,6 +349,39 @@ What differs from the 192:
   0x7F8 (records 0xd0-0xd7, in `aaviewer/main.c`; 0xd6 the sound,
   0xd7 the car).
 
+### In a car: the viewer as the disc's own program
+
+(2026-11-25.)  For a unit that goes back into a car the viewer is the
+program of a disc of its own: no loader, no card with a program,
+nothing pushed over CAN.  The bridge is on a ribbon behind slot 2 (the
+slot itself empty, so the stock software, which looks at the slot's
+card switch, leaves it alone).
+
+    sh $RNSE_SDK/build.sh 193 $PWD/aaviewer
+    rnse custom stock.iso V575 $RNSE_SDK/out/aaviewer-193.bin aa193.iso --index 0990
+
+The stock software takes the disc for an update at every start (index
+0990: above any installed one) and starts the viewer, about as long
+after the start as it takes it to read a disc.
+
+- **The key out.**  Nothing in the viewer puts a unit to sleep.  Once
+  the car has shown its ignition on, the key out of the lock (0x271 bit
+  0 clear, or the message gone) for ten seconds without a break ends
+  the viewer: the sound stopped, record 0xda on CAN, and a restart into
+  the stock software, which sleeps with the car (`key_off_check`;
+  `-DAA_KEYOFF_S=n`, 0 leaves it out).  A bus that never showed an
+  ignition (a unit alone on a bench) changes nothing.
+- **Back to the stock software:** CD EJECT, then the key out (or the
+  power off and on).  While the disc is in, the unit is Android Auto
+  only.
+- Tested in the emulator: `android_auto_viewer_from_its_own_disc_on_the_193`
+  (`tests/disc.rs`: the stock software starts it, also the software of
+  another index with `RNSE_UNIT_DISC`; pictures, the display key, CD
+  EJECT, the key out) and `viewer_hands_back_to_stock_at_key_off_on_the_193`.
+  Not yet on a unit: whether the stock software, restarted with the key
+  out, leaves the disc alone and sleeps is what a bench run has to show
+  before a unit goes into a car with it.
+
 Needs rnse-sdk v0.4.0 or later (sound and CAN on the 193; v0.3.0 for the 193's SD host, its 16-bit
 picture, `build.sh` building an example with a `place` file for the
 193).
