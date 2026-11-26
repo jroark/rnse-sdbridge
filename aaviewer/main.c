@@ -245,12 +245,14 @@ static void display_watch(void)
 /* The key out of the ignition lock: the stock software's to deal with.
  * Nothing here puts a unit to sleep, and a viewer started from its own
  * disc in a car would keep the unit awake on the battery.  So once the
- * car has shown its ignition on, the key out (or the lock's message
- * gone) for AA_KEYOFF_S seconds without a break ends the viewer: the
+ * lock's message has come at all (also with the key out: the stock
+ * software, restarted, starts the disc again while the car's bus is
+ * awake, a bench 193, 2026-11-25), the key out (or the message gone)
+ * for AA_KEYOFF_S seconds without a break ends the viewer: the
  * sound stopped, a record (0xda: value the seconds, second what
  * car_ignition said last), and a restart into the stock software, which
- * sleeps with the car as it always did.  The 193 only; never without an
- * ignition seen on first, so a unit alone on a bench runs on; 0 leaves
+ * sleeps with the car as it always did.  The 193 only; never without a
+ * message seen first, so a unit alone on a bench runs on; 0 leaves
  * it out.  Called between pictures and in waits, not from the decoder's
  * idle hook (it stops the sound). */
 #ifndef AA_KEYOFF_S
@@ -267,7 +269,7 @@ static void key_off_check(void)
         return;
     at = millis();
     v = car_ignition();
-    if (v >= 0 && (v & CAR_IGNITION))
+    if (v >= 0)
         seen_on = 1;
     if (!seen_on || (v >= 0 && (v & CAR_KEY_IN))) {
         off = 0;

@@ -365,7 +365,7 @@ The stock software takes the disc for an update at every start (index
 after the start as it takes it to read a disc.
 
 - **The key out.**  Nothing in the viewer puts a unit to sleep.  Once
-  the car has shown its ignition on, the key out of the lock (0x271 bit
+  the lock's message has come at all, the key out of the lock (0x271 bit
   0 clear, or the message gone) for ten seconds without a break ends
   the viewer: the sound stopped, record 0xda on CAN, and a restart into
   the stock software, which sleeps with the car (`key_off_check`;
@@ -378,9 +378,11 @@ after the start as it takes it to read a disc.
   (`tests/disc.rs`: the stock software starts it, also the software of
   another index with `RNSE_UNIT_DISC`; pictures, the display key, CD
   EJECT, the key out) and `viewer_hands_back_to_stock_at_key_off_on_the_193`.
-  Not yet on a unit: whether the stock software, restarted with the key
-  out, leaves the disc alone and sleeps is what a bench run has to show
-  before a unit goes into a car with it.
+  On a bench 193 (2026-11-25, the viewer pushed over CAN): the record
+  9.5 s after the key went out, the restart, and the stock software up
+  again; on a bench supply, which never goes away, it then starts the
+  disc again some 77 s later, and the viewer hands back again.  Not yet
+  in a car.
 
 Needs rnse-sdk v0.4.0 or later (sound and CAN on the 193; v0.3.0 for the 193's SD host, its 16-bit
 picture, `build.sh` building an example with a `place` file for the
