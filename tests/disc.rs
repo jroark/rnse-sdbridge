@@ -405,3 +405,126 @@ fn android_auto_viewer_from_the_sd_loader() {
     assert!(m.panel_key("RETURN", false));
     until(&mut m, before, "TEST ENDED BY HOLDING RETURN", 30).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[before..])));
 }
+
+/// The viewer as a disc's own program on the 193, as it goes into a car:
+/// no loader, no card with a program, nothing pushed.  The stock software
+/// (RNSE_DISC's V575, or that of RNSE_UNIT_DISC when the unit has other
+/// software than the disc was made from) takes the disc, index 0990, for
+/// an update and starts the viewer, built as for the car (no -DAA_CRC:
+/// its reports are the CAN records).  The bridge's card is in the slot
+/// the software calls SD2: found (0xd0 1), every picture shown (0xd5 0),
+/// the screen not blank; the display key and CD EJECT answer; and with
+/// the key out of the ignition lock for ten seconds it says so (0xda)
+/// and restarts.
+#[test]
+fn android_auto_viewer_from_its_own_disc_on_the_193() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let sdk = kit();
+    let variants = fw::load_variants(&image).unwrap();
+    let Some(v) = variants.iter().find(|v| Model::for_variant(&v.name) == Some(Model::Rnse193)) else { return };
+    let built = std::process::Command::new("sh").arg(sdk.join("build.sh")).arg("193").arg(own("aaviewer")).output().unwrap();
+    if !built.status.success() {
+        let text = String::from_utf8_lossy(&built.stderr);
+        assert!(text.contains("gcc: not found") || text.contains("gcc: command not found"), "{}", text);
+        return;
+    }
+    let program = std::fs::read(sdk.join("out/aaviewer-193.bin")).unwrap();
+    let (mut custom, _) = fw::custom_loader(&image, &v.name, &program).unwrap();
+    fw::set_disc_index(&mut custom, &v.name, "0990").unwrap();
+    if let Some(path) = std::env::var_os("RNSE_AA_CAR_ISO") {
+        std::fs::write(path, &custom).unwrap();
+    }
+    // The unit's own software.
+    let unit_image = std::env::var_os("RNSE_UNIT_DISC").map(|p| std::fs::read(p).expect("RNSE_UNIT_DISC is not readable")).unwrap_or_else(|| image.clone());
+    let unit_variants = fw::load_variants(&unit_image).unwrap();
+    let installed = unit_variants.iter().find(|x| x.name == v.name).expect("RNSE_UNIT_DISC has no software for this unit");
+    let index = fw::IndexInfo::from_disc(&unit_image, &v.name).unwrap();
+    println!("installed: {} index {}", v.name, index.sofidx);
+    // The bridge's card.
+    let dir = std::env::temp_dir().join(format!("rnse-aacar-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let tool = dir.join("host");
+    let src = root.join("src");
+    let Ok(cc) = std::process::Command::new("cc").args(["-O2", "-o"]).arg(&tool).arg(root.join("tests/host.c"))
+        .arg(src.join("card.c")).arg(src.join("volume.c")).arg(src.join("crc.c")).arg(src.join("aap.c"))
+        .arg(src.join("aastream.c")).output() else { return };
+    assert!(cc.status.success(), "{}", String::from_utf8_lossy(&cc.stderr));
+    let bridge_image = dir.join("bridge.img");
+    assert!(std::process::Command::new(&tool).arg(&bridge_image).arg(root.join("tests/data/margin.264")).arg("2000").status().unwrap().success());
+    let bridge = std::fs::read(&bridge_image).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+
+    let mut m = Machine::for_model(Model::Rnse193);
+    m.set_cpu_ratio(8);
+    m.echo_console = false;
+    m.scramble_ram();
+    m.cache_model();
+    m.install_boot_stub(&v.name);
+    m.install(installed, &index);
+    m.atapi().load(custom.clone());
+    m.start_os(installed).unwrap();
+    m.set_ignition(true);
+    let ms = m.cycles_per_ms();
+    let entry = fw::load_variants(&custom).unwrap().iter().find(|x| x.name == v.name).unwrap().module("LDM").unwrap().entries[0];
+    m.cpu.breakpoints.push(entry);
+    let mut stop = Stop::Budget;
+    for _ in 0..60 {
+        if stop != Stop::Budget {
+            break;
+        }
+        stop = m.run(1_000 * ms);
+    }
+    assert_eq!(stop, Stop::Breakpoint, "the installed software ({}) did not start the disc's program: {:?}", index.sofidx, m.cpu.fault);
+    m.cpu.breakpoints.clear();
+    m.can().tx.clear();
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(bridge).unwrap()));
+    let records = |m: &mut Machine, test: u8, item: u8| -> Vec<u32> {
+        m.can().tx.iter().filter(|f| f.id == 0x7f8 && f.len == 8 && f.data[0] == test && f.data[1] == item)
+            .map(|f| u32::from_be_bytes([f.data[2], f.data[3], f.data[4], f.data[5]])).collect()
+    };
+    let mut shown = 0;
+    for _ in 0..600 {
+        assert_eq!(m.run(100 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+        shown = records(&mut m, 0xd5, 0).last().copied().unwrap_or(0);
+        if shown >= 12 {
+            break;
+        }
+    }
+    assert_eq!(m.resets, 0, "the watchdog reset the unit");
+    assert!(!records(&mut m, 0xd0, 1).is_empty(), "the bridge was not found");
+    assert_eq!(shown, 12, "pictures shown");
+    let (w, h, rgb) = m.render();
+    assert_eq!((w, h), (800, 480));
+    let first = [rgb[0], rgb[1], rgb[2]];
+    assert!(rgb.chunks(3).any(|p| p != first), "a blank screen");
+    if let Some(path) = std::env::var_os("RNSE_AA_CAR_SHOT") {
+        std::fs::write(path, rnse::png::encode_rgb(w, h, &rgb)).unwrap();
+    }
+    // The display key opens the display; CD EJECT ejects the disc.
+    let was = m.display_pos();
+    assert!(m.panel_key("EJECT", true));
+    assert_eq!(m.run(200 * ms), Stop::Budget);
+    assert!(m.panel_key("EJECT", false));
+    assert_eq!(m.run(3_000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+    assert!(m.display_pos() <= 94, "the display did not open: {} then {}", was, m.display_pos());
+    assert_eq!(m.display_motor(), 0, "the motor stops when open");
+    let before = m.atapi().ejects;
+    assert!(m.panel_key("CD_EJECT", true));
+    assert_eq!(m.run(500 * ms), Stop::Budget);
+    assert!(m.panel_key("CD_EJECT", false));
+    assert_eq!(m.run(500 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+    let ejects = m.atapi().ejects;
+    assert_eq!(ejects, before + 1, "CD EJECT did not eject the disc");
+    // The key out.
+    m.set_ignition(false);
+    let mut restarted = false;
+    for _ in 0..130 {
+        restarted |= m.run(100 * ms) != Stop::Budget;
+        if restarted || !records(&mut m, 0xda, 0).is_empty() {
+            break;
+        }
+    }
+    assert_eq!(records(&mut m, 0xda, 0), vec![10], "no hand-back with the key out");
+}

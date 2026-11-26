@@ -185,7 +185,10 @@ static void line(const char *text)
  *   0xd7 n  every 2 s, the car (CAN): 0 value changes of the steering
  *           wheel's key seen, second frames lost (can_lost); 1 value
  *           car_ignition (0xffffffff: no ignition message seen), second
- *           the wheel's key now */
+ *           the wheel's key now
+ *   0xda 0  once, before the viewer restarts into the stock software
+ *           because the key is out (key_off_check): value the seconds
+ *           it waited, second car_ignition's last */
 #define CAN193 0xffdf0000
 #define CAN193_MB1 (CAN193 + 0x100 + 0x20)
 
@@ -239,12 +242,58 @@ static void display_watch(void)
     }
 }
 
+/* The key out of the ignition lock: the stock software's to deal with.
+ * Nothing here puts a unit to sleep, and a viewer started from its own
+ * disc in a car would keep the unit awake on the battery.  So once the
+ * lock's message has come at all (also with the key out: the stock
+ * software, restarted, starts the disc again while the car's bus is
+ * awake, a bench 193, 2026-11-25), the key out (or the message gone)
+ * for AA_KEYOFF_S seconds without a break ends the viewer: the
+ * sound stopped, a record (0xda: value the seconds, second what
+ * car_ignition said last), and a restart into the stock software, which
+ * sleeps with the car as it always did.  The 193 only; never without a
+ * message seen first, so a unit alone on a bench runs on; 0 leaves
+ * it out.  Called between pictures and in waits, not from the decoder's
+ * idle hook (it stops the sound). */
+#ifndef AA_KEYOFF_S
+#define AA_KEYOFF_S 10
+#endif
+static void leave(void);
+
+static void key_off_check(void)
+{
+    static u32 at, off_since;
+    static int seen_on, off;
+    int v;
+    if (!ON_193 || !AA_KEYOFF_S || millis() - at < 100)
+        return;
+    at = millis();
+    v = car_ignition();
+    if (v >= 0)
+        seen_on = 1;
+    if (!seen_on || (v >= 0 && (v & CAR_KEY_IN))) {
+        off = 0;
+        return;
+    }
+    if (!off) {
+        off = 1;
+        off_since = at;
+        return;
+    }
+    if (at - off_since < AA_KEYOFF_S * 1000u)
+        return;
+    say(0xda, 0, AA_KEYOFF_S, (u32)v);
+    leave();
+    restart();
+}
+
 static void pause(u32 ms)
 {
     u32 t = millis();
     while (millis() - t < ms) {
         panel_service();
         display_watch();
+        key_off_check();
         if (wait_idle)
             wait_idle();
         cpu_idle();
@@ -1750,6 +1799,7 @@ int main(void)
             }
             inputs();
             report();
+            key_off_check();
         }
         link_up = 0;
         /* (open_bridge may look at the other slot: its processor is
